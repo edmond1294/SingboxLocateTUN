@@ -7,17 +7,25 @@ BACKUP_DIR="/etc/sing-box/backup"
 SERVICE="sing-box"
 BIN="/usr/local/bin/sing-box"
 CMD="/usr/local/bin/out"
+MANAGER="/usr/local/bin/vps-out"
 TMP="/tmp/out_proxy_$$"
 
 mkdir -p "$BACKUP_DIR"
 
 cleanup() {
-    rm -f "$TMP" "$TMP.link" "$TMP.json" "$TMP.py" 2>/dev/null || true
+    rm -f \
+        "$TMP" \
+        "$TMP.link" \
+        "$TMP.json" \
+        "$TMP.py" \
+        "$TMP.err" \
+        2>/dev/null || true
 }
+
 trap cleanup EXIT
 
 # ============================================================
-# 基礎
+# ROOT
 # ============================================================
 
 if [ "$(id -u)" != "0" ]; then
@@ -25,7 +33,12 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
+# ============================================================
+# 系统检测
+# ============================================================
+
 detect_os() {
+
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS="${ID:-unknown}"
@@ -34,6 +47,10 @@ detect_os() {
         OS="unknown"
     fi
 }
+
+# ============================================================
+# 安装依赖
+# ============================================================
 
 install_dependencies() {
 
@@ -45,8 +62,11 @@ install_dependencies() {
     case "$OS" in
 
         ubuntu|debian)
+
             export DEBIAN_FRONTEND=noninteractive
+
             apt-get update -y
+
             apt-get install -y \
                 curl \
                 wget \
@@ -57,10 +77,13 @@ install_dependencies() {
                 tar \
                 gzip \
                 unzip
+
             ;;
 
         centos|rhel|rocky|almalinux|fedora)
+
             if command -v dnf >/dev/null 2>&1; then
+
                 dnf install -y \
                     curl \
                     wget \
@@ -71,7 +94,9 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip
+
             else
+
                 yum install -y \
                     curl \
                     wget \
@@ -82,16 +107,22 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip
+
             fi
+
             ;;
 
         *)
+
             echo "未识别系统：$OS"
-            echo "尝试使用 apt 安装依赖..."
+            echo "尝试自动安装依赖..."
 
             if command -v apt-get >/dev/null 2>&1; then
+
                 export DEBIAN_FRONTEND=noninteractive
+
                 apt-get update -y
+
                 apt-get install -y \
                     curl \
                     wget \
@@ -102,16 +133,34 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip
+
+            elif command -v dnf >/dev/null 2>&1; then
+
+                dnf install -y \
+                    curl \
+                    wget \
+                    ca-certificates \
+                    python3 \
+                    iproute \
+                    procps \
+                    tar \
+                    gzip \
+                    unzip
+
             else
+
                 echo "无法自动安装依赖。"
                 exit 1
+
             fi
+
             ;;
+
     esac
 }
 
 # ============================================================
-# 安装 sing-box
+# sing-box
 # ============================================================
 
 install_singbox() {
@@ -120,41 +169,65 @@ install_singbox() {
     echo "正在检查 sing-box..."
 
     if command -v sing-box >/dev/null 2>&1; then
+
         SB_BIN="$(command -v sing-box)"
+
     elif [ -x "$BIN" ]; then
+
         SB_BIN="$BIN"
+
     else
+
         SB_BIN=""
+
     fi
 
-    if [ -n "$SB_BIN" ]; then
-        echo "检测到 sing-box：$($SB_BIN version 2>/dev/null | head -n 1)"
+    if [ -n "${SB_BIN:-}" ]; then
+
+        echo "检测到 sing-box："
+
+        "$SB_BIN" version 2>/dev/null | head -n 1
+
         return 0
+
     fi
 
-    echo "未安装 sing-box，开始自动安装..."
+    echo
+    echo "未安装 sing-box。"
+    echo "开始自动安装..."
 
-    bash <(curl -fsSL https://sing-box.app/install.sh)
+    if ! bash <(curl -fsSL https://sing-box.app/install.sh); then
 
-    if command -v sing-box >/dev/null 2>&1; then
-        SB_BIN="$(command -v sing-box)"
-    elif [ -x "$BIN" ]; then
-        SB_BIN="$BIN"
-    fi
-
-    if [ -z "${SB_BIN:-}" ]; then
         echo
         echo "sing-box 安装失败。"
         exit 1
+
+    fi
+
+    if command -v sing-box >/dev/null 2>&1; then
+
+        SB_BIN="$(command -v sing-box)"
+
+    elif [ -x "$BIN" ]; then
+
+        SB_BIN="$BIN"
+
+    else
+
+        echo
+        echo "sing-box 安装完成后仍然无法找到程序。"
+        exit 1
+
     fi
 
     echo
     echo "sing-box 安装完成："
+
     "$SB_BIN" version 2>/dev/null | head -n 1
 }
 
 # ============================================================
-# 创建 systemd
+# systemd
 # ============================================================
 
 install_service() {
@@ -183,7 +256,7 @@ EOF
 }
 
 # ============================================================
-# Python 解析 VLESS / SOCKS5
+# 解析 VLESS / SOCKS5
 # ============================================================
 
 parse_link() {
@@ -200,16 +273,22 @@ import base64
 
 link = open(sys.argv[1], "r", encoding="utf-8").read().strip()
 
+
 def unquote(v):
     return urllib.parse.unquote(v or "")
 
+
 def decode_b64(v):
+
     v = v.strip()
+
     v += "=" * ((4 - len(v) % 4) % 4)
+
     try:
         return base64.urlsafe_b64decode(v).decode()
-    except:
+    except Exception:
         return ""
+
 
 def vless_config(url):
 
@@ -238,14 +317,16 @@ def vless_config(url):
     transport = get("type", "").lower()
 
     sni = get("sni", "")
-    fp = get("fp", "")
+    fp = get("fp", "") or "chrome"
     flow = get("flow", "")
+
     path = unquote(get("path", "/"))
+
     ws_host = get("host", "")
 
-    # --------------------------------------------------------
+    # ========================================================
     # VLESS + Reality
-    # --------------------------------------------------------
+    # ========================================================
 
     if security == "reality":
 
@@ -258,16 +339,22 @@ def vless_config(url):
         obj = {
             "type": "vless",
             "tag": "proxy",
+
             "server": host,
             "server_port": port,
+
             "uuid": uuid,
+
             "tls": {
                 "enabled": True,
+
                 "server_name": sni,
+
                 "utls": {
                     "enabled": True,
-                    "fingerprint": fp or "chrome"
+                    "fingerprint": fp
                 },
+
                 "reality": {
                     "enabled": True,
                     "public_key": public_key,
@@ -281,29 +368,37 @@ def vless_config(url):
 
         return obj, "VLESS + Reality"
 
-    # --------------------------------------------------------
+    # ========================================================
     # VLESS + WS + TLS
-    # --------------------------------------------------------
+    # ========================================================
 
     if transport == "ws" and security == "tls":
 
         obj = {
             "type": "vless",
             "tag": "proxy",
+
             "server": host,
             "server_port": port,
+
             "uuid": uuid,
+
             "tls": {
                 "enabled": True,
+
                 "server_name": sni or ws_host or host,
+
                 "utls": {
                     "enabled": True,
-                    "fingerprint": fp or "chrome"
+                    "fingerprint": fp
                 }
             },
+
             "transport": {
                 "type": "ws",
+
                 "path": path or "/",
+
                 "headers": {}
             }
         }
@@ -315,10 +410,6 @@ def vless_config(url):
             obj["flow"] = flow
 
         return obj, "VLESS + WS + TLS"
-
-    # --------------------------------------------------------
-    # 其他 VLESS
-    # --------------------------------------------------------
 
     raise ValueError(
         "暂不支持此 VLESS 类型，请使用 VLESS + WS + TLS 或 VLESS + Reality"
@@ -340,8 +431,10 @@ def socks_config(url):
     obj = {
         "type": "socks",
         "tag": "proxy",
+
         "server": u.hostname,
         "server_port": u.port,
+
         "version": "5"
     }
 
@@ -368,15 +461,12 @@ def parse(url):
     ):
         return socks_config(url)
 
-    # --------------------------------------------------------
-    # 如果用户贴的是 Base64 后的 VLESS / SOCKS5
-    # 自动尝试解码
-    # --------------------------------------------------------
-
     decoded = decode_b64(url)
 
     if decoded:
+
         for line in decoded.splitlines():
+
             line = line.strip()
 
             if line.startswith("vless://"):
@@ -396,16 +486,24 @@ def parse(url):
 
 obj, name = parse(link)
 
-print(json.dumps({
-    "name": name,
-    "outbound": obj
-}, ensure_ascii=False))
+print(
+    json.dumps(
+        {
+            "name": name,
+            "outbound": obj
+        },
+        ensure_ascii=False
+    )
+)
 PY
 
     if ! python3 "$TMP.py" "$TMP.link" > "$TMP.json" 2>"$TMP.err"; then
+
         echo
         echo "解析失败："
+
         cat "$TMP.err"
+
         return 1
     fi
 
@@ -413,7 +511,7 @@ PY
 }
 
 # ============================================================
-# 生成配置
+# 生成 sing-box 配置
 # ============================================================
 
 generate_config() {
@@ -424,8 +522,10 @@ generate_config() {
     mkdir -p "$BACKUP_DIR"
 
     if [ -f "$CONFIG" ]; then
+
         cp -f "$CONFIG" \
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
+
     fi
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
@@ -440,29 +540,41 @@ with open(parsed_file, "r", encoding="utf-8") as f:
 
 outbound = data["outbound"]
 
+# ============================================================
+# 新版 sing-box DNS
+# ============================================================
+
+dns_server = {
+    "type": "udp",
+    "tag": "dns",
+    "server": "1.1.1.1",
+    "server_port": 53,
+    "detour": "proxy"
+}
+
 config = {
+
     "log": {
         "disabled": False,
         "level": "warn"
     },
 
     "dns": {
+
         "servers": [
-            {
-                "type": "udp",
-                "tag": "dns",
-                "server": "1.1.1.1",
-                "server_port": 53,
-                "detour": "proxy"
-            }
+            dns_server
         ],
+
         "final": "dns"
     },
 
     "inbounds": [
+
         {
             "type": "tun",
+
             "tag": "tun-in",
+
             "interface_name": "singtun0",
 
             "address": [
@@ -473,11 +585,14 @@ config = {
             "mtu": 1500,
 
             "auto_route": True,
+
             "strict_route": True
         }
+
     ],
 
     "outbounds": [
+
         outbound,
 
         {
@@ -489,24 +604,54 @@ config = {
             "type": "block",
             "tag": "block"
         }
+
     ],
 
     "route": {
+
         "auto_detect_interface": True,
 
+        "default_domain_resolver": "dns",
+
         "rules": [
+
             {
                 "protocol": "dns",
                 "action": "hijack-dns"
             }
+
         ],
 
         "final": "proxy"
     }
 }
 
+# ============================================================
+# 新版 sing-box：
+# 所有需要域名解析的 proxy outbound 明确指定 resolver
+# ============================================================
+
+for out in config["outbounds"]:
+
+    if out.get("tag") == "proxy":
+
+        if out.get("type") not in (
+            "direct",
+            "block",
+            "dns"
+        ):
+
+            out["domain_resolver"] = "dns"
+
 with open(config_file, "w", encoding="utf-8") as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
+
+    json.dump(
+        config,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
+
     f.write("\n")
 PY
 }
@@ -518,34 +663,44 @@ PY
 start_proxy() {
 
     echo
-    echo "正在检查配置..."
+    echo "正在检查 sing-box 配置..."
 
     if ! "$SB_BIN" check -c "$CONFIG"; then
+
         echo
         echo "配置检查失败。"
+        echo
         return 1
+
     fi
 
     install_service
 
     systemctl enable "$SERVICE" >/dev/null 2>&1
+
     systemctl restart "$SERVICE"
 
     sleep 2
 
     if systemctl is-active --quiet "$SERVICE"; then
+
         echo
         echo "全局出口已开启。"
         echo
+
         return 0
+
     fi
 
     echo
     echo "sing-box 启动失败。"
     echo
+
     systemctl status "$SERVICE" --no-pager
+
     echo
     echo "最近日志："
+
     journalctl -u "$SERVICE" -n 30 --no-pager
 
     return 1
@@ -573,36 +728,29 @@ status_proxy() {
     echo
 
     if systemctl is-active --quiet "$SERVICE"; then
+
         echo "状态：运行中"
+
     else
+
         echo "状态：已停止"
+
     fi
 
     echo
 
     if [ -f "$CONFIG" ]; then
-        echo "当前配置："
-        echo "$CONFIG"
-        echo
-    fi
 
-    if command -v curl >/dev/null 2>&1; then
-
-        echo "当前 IPv4 出口："
-
-        curl -4 \
-            --connect-timeout 5 \
-            --max-time 10 \
-            -s https://api.ipify.org 2>/dev/null
+        echo "配置文件：$CONFIG"
 
         echo
+
     fi
 
-    echo
 }
 
 # ============================================================
-# 測試出口
+# 測試
 # ============================================================
 
 test_proxy() {
@@ -613,9 +761,11 @@ test_proxy() {
 
     echo "IPv4："
 
-    curl -4 \
+    curl \
+        -4 \
         --connect-timeout 5 \
         --max-time 15 \
+        -s \
         https://api.ipify.org
 
     echo
@@ -623,10 +773,13 @@ test_proxy() {
     echo
     echo "IPv6："
 
-    curl -6 \
+    curl \
+        -6 \
         --connect-timeout 5 \
         --max-time 15 \
-        https://api64.ipify.org 2>/dev/null || true
+        -s \
+        https://api64.ipify.org \
+        2>/dev/null || true
 
     echo
 }
@@ -643,8 +796,7 @@ select_proxy() {
     echo "           VPS 全局出口管理"
     echo "=========================================="
     echo
-    echo "请选择出口类型："
-    echo
+
     echo "# 1. VLESS + WS + TLS"
     echo "# 2. VLESS + Reality"
     echo "# 3. SOCKS5"
@@ -672,37 +824,39 @@ select_proxy() {
             sleep 1
             return
             ;;
+
     esac
 
     echo
     echo "你选择：$EXPECTED"
     echo
-    echo "请直接粘贴完整连接。"
-    echo
-    echo "例如："
-    echo "vless://..."
-    echo "或"
-    echo "socks5://..."
+    echo "请直接粘贴完整连接："
     echo
 
-    read -r -p "粘贴连接：" LINK
+    read -r -p "> " LINK
 
     if [ -z "$LINK" ]; then
+
         echo
         echo "连接不能为空。"
         sleep 1
         return
+
     fi
 
     echo
     echo "正在解析..."
 
     if ! parse_link "$LINK"; then
+
         sleep 2
+
         return
+
     fi
 
-    PARSED_NAME="$(python3 - "$TMP.json" <<'PY'
+    PARSED_NAME="$(
+        python3 - "$TMP.json" <<'PY'
 import json
 import sys
 
@@ -711,156 +865,88 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 PY
 )"
 
+    echo
+    echo "解析类型：$PARSED_NAME"
+
     if [ "$PARSED_NAME" != "$EXPECTED" ]; then
 
         echo
         echo "链接类型与选择不一致。"
         echo
-        echo "你选择：$EXPECTED"
-        echo "实际解析：$PARSED_NAME"
-        echo
 
-        read -r -p "是否仍然使用此出口？[y/N]：" ANSWER
+        read -r -p "是否继续使用？[y/N]：" ANSWER
 
         case "$ANSWER" in
+
             y|Y)
                 ;;
+
             *)
                 echo "已取消。"
                 sleep 1
                 return
                 ;;
+
         esac
+
     fi
 
     generate_config "$TMP.json"
 
+    echo
+    echo "正在检查配置..."
+
+    if ! "$SB_BIN" check -c "$CONFIG"; then
+
+        echo
+        echo "配置检查失败。"
+        echo
+
+        return 1
+
+    fi
+
+    echo
+    echo "配置检查通过。"
+    echo
+    echo "正在启动全局出口..."
+
     if ! start_proxy; then
-        return
-    fi
 
-    echo "出口类型：$PARSED_NAME"
-    echo
-    echo "配置完成。"
-    echo
+        return 1
 
-    read -r -p "按 Enter 返回菜单..." _
-}
-
-# ============================================================
-# 快速重新安装
-# ============================================================
-
-quick_install() {
-
-    install_dependencies
-    install_singbox
-
-    echo
-    echo "依赖与 sing-box 已准备完成。"
-    echo
-
-    read -r -p "按 Enter 返回菜单..." _
-}
-
-# ============================================================
-# 查看配置
-# ============================================================
-
-show_config() {
-
-    clear
-
-    echo "=========================================="
-    echo "              当前配置"
-    echo "=========================================="
-    echo
-
-    if [ -f "$CONFIG" ]; then
-        cat "$CONFIG"
-    else
-        echo "暂无配置。"
     fi
 
     echo
-
-    read -r -p "按 Enter 返回菜单..." _
-}
-
-# ============================================================
-# 日志
-# ============================================================
-
-show_log() {
-
-    clear
-
-    echo "=========================================="
-    echo "              sing-box 日志"
-    echo "=========================================="
-    echo
-
-    journalctl -u "$SERVICE" -n 80 --no-pager
-
+    echo "出口配置完成。"
     echo
 
     read -r -p "按 Enter 返回菜单..." _
 }
 
 # ============================================================
-# 卸載
-# ============================================================
-
-uninstall_proxy() {
-
-    echo
-    echo "警告：这会删除 sing-box 全局出口配置。"
-    echo
-
-    read -r -p "确认卸载？[y/N]：" ANSWER
-
-    case "$ANSWER" in
-        y|Y)
-            systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
-
-            rm -f "$CONFIG"
-            rm -f /etc/systemd/system/sing-box.service
-
-            systemctl daemon-reload
-
-            echo
-            echo "全局出口配置已删除。"
-            echo "sing-box 程序本身未删除。"
-            echo
-            ;;
-
-        *)
-            echo "已取消。"
-            ;;
-    esac
-
-    sleep 1
-}
-
-# ============================================================
-# 安裝 out 命令
+# 安装 out
 # ============================================================
 
 install_out_command() {
 
     cat > "$CMD" <<'EOF'
 #!/usr/bin/env bash
+
 exec /usr/local/bin/vps-out
 EOF
 
     chmod +x "$CMD"
 
-    cat > /usr/local/bin/vps-out <<'EOF'
+    cat > "$MANAGER" <<'EOF'
 #!/usr/bin/env bash
+
+set -u
 
 CONFIG="/etc/sing-box/config.json"
 SERVICE="sing-box"
 SB_BIN="$(command -v sing-box 2>/dev/null || echo /usr/local/bin/sing-box)"
+
 TMP="/tmp/vps-out-$$"
 
 cleanup() {
@@ -868,6 +954,11 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+
+# ============================================================
+# 解析
+# ============================================================
 
 parse_link() {
 
@@ -883,23 +974,35 @@ import base64
 
 link = open(sys.argv[1], "r", encoding="utf-8").read().strip()
 
+
 def uq(x):
     return urllib.parse.unquote(x or "")
 
+
 def b64(x):
+
     x = x.strip()
+
     x += "=" * ((4 - len(x) % 4) % 4)
+
     try:
         return base64.urlsafe_b64decode(x).decode()
     except:
         return ""
 
+
 def parse_vless(url):
 
     p = urllib.parse.urlsplit(url)
 
-    if not p.username or not p.hostname or not p.port:
-        raise ValueError("VLESS 链接不完整")
+    if not p.username:
+        raise ValueError("VLESS 缺少 UUID")
+
+    if not p.hostname:
+        raise ValueError("VLESS 缺少服务器")
+
+    if not p.port:
+        raise ValueError("VLESS 缺少端口")
 
     q = urllib.parse.parse_qs(p.query)
 
@@ -907,6 +1010,7 @@ def parse_vless(url):
         return q.get(k, [d])[0]
 
     uuid = uq(p.username)
+
     server = p.hostname
     port = p.port
 
@@ -915,6 +1019,7 @@ def parse_vless(url):
 
     sni = g("sni")
     fp = g("fp") or "chrome"
+
     flow = g("flow")
 
     if security == "reality":
@@ -926,24 +1031,39 @@ def parse_vless(url):
             raise ValueError("Reality 缺少 pbk")
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
             "server_port": port,
+
             "uuid": uuid,
+
             "tls": {
+
                 "enabled": True,
+
                 "server_name": sni,
+
                 "utls": {
                     "enabled": True,
                     "fingerprint": fp
                 },
+
                 "reality": {
+
                     "enabled": True,
+
                     "public_key": pbk,
+
                     "short_id": sid
+
                 }
+
             }
+
         }
 
         if flow:
@@ -954,27 +1074,46 @@ def parse_vless(url):
     if typ == "ws" and security == "tls":
 
         path = uq(g("path", "/"))
+
         host = g("host")
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
             "server_port": port,
+
             "uuid": uuid,
+
             "tls": {
+
                 "enabled": True,
+
                 "server_name": sni or host or server,
+
                 "utls": {
+
                     "enabled": True,
+
                     "fingerprint": fp
+
                 }
+
             },
+
             "transport": {
+
                 "type": "ws",
+
                 "path": path,
+
                 "headers": {}
+
             }
+
         }
 
         if host:
@@ -985,21 +1124,33 @@ def parse_vless(url):
 
         return out
 
-    raise ValueError("不支持的 VLESS 类型")
+    raise ValueError(
+        "不支持的 VLESS 类型"
+    )
+
 
 def parse_socks(url):
 
     p = urllib.parse.urlsplit(url)
 
-    if not p.hostname or not p.port:
-        raise ValueError("SOCKS5 链接不完整")
+    if not p.hostname:
+        raise ValueError("SOCKS5 缺少服务器")
+
+    if not p.port:
+        raise ValueError("SOCKS5 缺少端口")
 
     out = {
+
         "type": "socks",
+
         "tag": "proxy",
+
         "server": p.hostname,
+
         "server_port": p.port,
+
         "version": "5"
+
     }
 
     if p.username:
@@ -1010,7 +1161,9 @@ def parse_socks(url):
 
     return out
 
+
 if link.startswith("vless://"):
+
     obj = parse_vless(link)
 
 elif (
@@ -1018,23 +1171,44 @@ elif (
     or link.startswith("socks5://")
     or link.startswith("socks5h://")
 ):
+
     obj = parse_socks(link)
 
 else:
+
     decoded = b64(link)
 
     if decoded.startswith("vless://"):
-        obj = parse_vless(decoded.strip())
-    elif decoded.startswith("socks5://"):
-        obj = parse_socks(decoded.strip())
-    else:
-        raise ValueError("无法识别链接")
 
-print(json.dumps(obj, ensure_ascii=False, indent=2))
+        obj = parse_vless(decoded.strip())
+
+    elif decoded.startswith("socks5://"):
+
+        obj = parse_socks(decoded.strip())
+
+    else:
+
+        raise ValueError(
+            "无法识别链接"
+        )
+
+
+print(
+    json.dumps(
+        obj,
+        ensure_ascii=False,
+        indent=2
+    )
+)
 PY
 
     python3 "$TMP.py" "$TMP.link" > "$TMP.out"
 }
+
+
+# ============================================================
+# 生成配置
+# ============================================================
 
 write_config() {
 
@@ -1043,7 +1217,10 @@ write_config() {
     mkdir -p /etc/sing-box
 
     if [ -f "$CONFIG" ]; then
-        cp "$CONFIG" "/etc/sing-box/config.backup.json"
+
+        cp "$CONFIG" \
+            "/etc/sing-box/config.backup.json"
+
     fi
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
@@ -1056,95 +1233,201 @@ dst = sys.argv[2]
 with open(src, encoding="utf-8") as f:
     outbound = json.load(f)
 
+
 config = {
+
     "log": {
+
         "disabled": False,
+
         "level": "warn"
+
     },
+
 
     "dns": {
+
         "servers": [
+
             {
+
                 "type": "udp",
+
                 "tag": "dns",
+
                 "server": "1.1.1.1",
+
                 "server_port": 53,
+
                 "detour": "proxy"
+
             }
+
         ],
+
         "final": "dns"
+
     },
 
+
     "inbounds": [
+
         {
+
             "type": "tun",
+
             "tag": "tun-in",
+
             "interface_name": "singtun0",
+
             "address": [
+
                 "172.19.0.1/30",
+
                 "fdfe:dcba:9876::1/126"
+
             ],
+
             "mtu": 1500,
+
             "auto_route": True,
+
             "strict_route": True
+
         }
+
     ],
+
 
     "outbounds": [
+
         outbound,
+
         {
+
             "type": "direct",
+
             "tag": "direct"
+
         },
+
         {
+
             "type": "block",
+
             "tag": "block"
+
         }
+
     ],
 
+
     "route": {
+
         "auto_detect_interface": True,
+
+        "default_domain_resolver": "dns",
+
         "rules": [
+
             {
+
                 "protocol": "dns",
+
                 "action": "hijack-dns"
+
             }
+
         ],
+
         "final": "proxy"
+
     }
+
 }
 
+
+for out in config["outbounds"]:
+
+    if out.get("tag") == "proxy":
+
+        if out.get("type") not in (
+            "direct",
+            "block",
+            "dns"
+        ):
+
+            out["domain_resolver"] = "dns"
+
+
 with open(dst, "w", encoding="utf-8") as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
+
+    json.dump(
+        config,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
+
     f.write("\n")
+
 PY
 }
 
+
+# ============================================================
+# 啟動
+# ============================================================
+
 start() {
 
+    echo
+
+    echo "正在检查配置..."
+
     if ! "$SB_BIN" check -c "$CONFIG"; then
+
         echo
         echo "配置检查失败。"
+
         return 1
+
     fi
 
     systemctl daemon-reload
+
     systemctl enable "$SERVICE" >/dev/null 2>&1
+
     systemctl restart "$SERVICE"
 
     sleep 2
 
     if systemctl is-active --quiet "$SERVICE"; then
+
         echo
         echo "全局出口已开启。"
         echo
+
     else
+
         echo
         echo "启动失败。"
-        journalctl -u "$SERVICE" -n 30 --no-pager
+        echo
+
+        journalctl \
+            -u "$SERVICE" \
+            -n 30 \
+            --no-pager
+
         return 1
+
     fi
 }
+
+
+# ============================================================
+# 選單
+# ============================================================
 
 menu() {
 
@@ -1156,162 +1439,291 @@ menu() {
         echo "              VPS 出口管理"
         echo "=========================================="
         echo
+
         echo "当前状态："
 
         if systemctl is-active --quiet "$SERVICE"; then
+
             echo "运行中"
+
         else
+
             echo "已停止"
+
         fi
 
         echo
+
         echo "# 1. 更换出口"
+
         echo "# 2. 开启全局出口"
+
         echo "# 3. 关闭全局出口"
+
         echo "# 4. 查看状态"
+
         echo "# 5. 测试出口"
+
         echo "# 6. 查看配置"
+
         echo "# 7. 查看日志"
+
         echo "# 8. 退出"
+
         echo
 
         read -r -p "请选择 [1-8]：" CHOICE
+
 
         case "$CHOICE" in
 
             1)
 
                 echo
+
                 echo "=========================================="
                 echo "             选择出口类型"
                 echo "=========================================="
+
                 echo
+
                 echo "# 1. VLESS + WS + TLS"
+
                 echo "# 2. VLESS + Reality"
+
                 echo "# 3. SOCKS5"
+
                 echo
 
                 read -r -p "请选择 [1-3]：" TYPE
 
+
                 case "$TYPE" in
+
                     1)
                         EXPECT="VLESS + WS + TLS"
                         ;;
+
                     2)
                         EXPECT="VLESS + Reality"
                         ;;
+
                     3)
                         EXPECT="SOCKS5"
                         ;;
+
                     *)
+
                         echo "无效选择。"
+
                         sleep 1
+
                         continue
+
                         ;;
+
                 esac
 
+
                 echo
+
                 echo "请选择：$EXPECT"
+
                 echo
+
                 echo "直接粘贴完整链接："
+
                 echo
 
                 read -r -p "> " LINK
 
+
                 if [ -z "$LINK" ]; then
+
                     echo "不能为空。"
+
                     sleep 1
+
                     continue
+
                 fi
 
+
+                echo
+
+                echo "正在解析..."
+
+
                 if ! parse_link "$LINK"; then
+
                     echo
+
                     echo "解析失败："
+
                     cat "$TMP.out" 2>/dev/null || true
+
                     sleep 2
+
                     continue
+
                 fi
+
 
                 write_config "$TMP.out"
 
+
                 echo
+
                 echo "解析成功。"
+
                 echo
+
                 echo "正在启动..."
 
+
                 start
 
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             2)
+
                 start
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             3)
+
                 systemctl stop "$SERVICE"
+
                 echo
+
                 echo "全局出口已关闭。"
+
                 echo
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             4)
+
                 echo
-                systemctl status "$SERVICE" --no-pager
+
+                systemctl status \
+                    "$SERVICE" \
+                    --no-pager
+
                 echo
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             5)
+
                 echo
+
                 echo "IPv4："
-                curl -4 --connect-timeout 5 --max-time 15 https://api.ipify.org
+
+                curl \
+                    -4 \
+                    --connect-timeout 5 \
+                    --max-time 15 \
+                    https://api.ipify.org
+
                 echo
+
                 echo
+
                 echo "IPv6："
-                curl -6 --connect-timeout 5 --max-time 15 https://api64.ipify.org 2>/dev/null || true
+
+                curl \
+                    -6 \
+                    --connect-timeout 5 \
+                    --max-time 15 \
+                    https://api64.ipify.org \
+                    2>/dev/null || true
+
                 echo
+
                 echo
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             6)
+
                 echo
+
                 if [ -f "$CONFIG" ]; then
+
                     cat "$CONFIG"
+
                 else
+
                     echo "暂无配置。"
+
                 fi
+
                 echo
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             7)
-                journalctl -u "$SERVICE" -n 80 --no-pager
+
+                journalctl \
+                    -u "$SERVICE" \
+                    -n 80 \
+                    --no-pager
+
                 echo
+
                 read -r -p "按 Enter 返回菜单..." _
+
                 ;;
+
 
             8)
+
                 clear
+
                 exit 0
+
                 ;;
 
+
             *)
+
                 echo "无效选择。"
+
                 sleep 1
+
                 ;;
+
         esac
 
     done
 }
 
+
 menu
 EOF
 
-    chmod +x /usr/local/bin/vps-out
+    chmod +x "$MANAGER"
 }
 
 # ============================================================
@@ -1319,7 +1731,9 @@ EOF
 # ============================================================
 
 install_dependencies
+
 install_singbox
+
 install_out_command
 
 clear
@@ -1328,18 +1742,29 @@ echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
 echo
+
 echo "支持："
-echo
-echo "# 1. VLESS + WS + TLS"
-echo "# 2. VLESS + Reality"
-echo "# 3. SOCKS5"
-echo
-echo "可以直接粘贴完整连接自动解析。"
-echo
-echo "管理命令："
-echo
-echo "out"
+
 echo
 
-# 直接进入菜单
-/usr/local/bin/vps-out
+echo "# 1. VLESS + WS + TLS"
+
+echo "# 2. VLESS + Reality"
+
+echo "# 3. SOCKS5"
+
+echo
+
+echo "直接粘贴完整链接即可自动解析。"
+
+echo
+
+echo "管理命令："
+
+echo
+
+echo "out"
+
+echo
+
+"$MANAGER"
