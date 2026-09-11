@@ -1,209 +1,376 @@
 #!/bin/bash
 
-# =========================================================
-# VPS 全局代理脚本
-# 支持：
-# 1. VLESS + WS + TLS
-# 2. VLESS + Reality
-# 3. SOCKS5
-#
-# sing-box + TUN
-# VPS 自身出口 + 普通程序出口全部经过代理
-# =========================================================
-
-set -u
-
 CONFIG="/etc/sing-box/config.json"
 BACKUP="/etc/sing-box/config.json.bak"
-WORKDIR="/etc/vps-out"
-SCRIPT="/usr/local/bin/vps-out"
-SHORTCUT="/usr/local/bin/out"
+INSTALL_PATH="/usr/local/bin/vps-out"
+OUT_PATH="/usr/local/bin/out"
 
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
-RESET="\033[0m"
+SCRIPT_NAME="VPS 全局出口代理"
+
+RED=""
+GREEN=""
+YELLOW=""
+BLUE=""
+RESET=""
+
+if [ -t 1 ]; then
+    RED="\033[31m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    BLUE="\033[36m"
+    RESET="\033[0m"
+fi
+
+if [ "$(id -u)" != "0" ]; then
+    echo "请使用 root 用户运行此脚本"
+    exit 1
+fi
 
 mkdir -p /etc/sing-box
-mkdir -p "$WORKDIR"
+mkdir -p /etc/vps-out
 
-# =========================================================
-# 基础依赖
-# =========================================================
+clear
+
+echo "======================================"
+echo "        VPS 全局出口代理"
+echo "======================================"
+echo ""
 
 install_basic() {
-
-    export DEBIAN_FRONTEND=noninteractive
+    echo "正在检查系统依赖..."
 
     if command -v apt-get >/dev/null 2>&1; then
-
+        export DEBIAN_FRONTEND=noninteractive
         apt-get update -y >/dev/null 2>&1
-
-        apt-get install -y \
-            curl \
-            wget \
-            ca-certificates \
-            unzip \
-            tar \
-            gzip \
-            iproute2 \
-            iptables \
-            iptables-persistent \
-            python3 \
-            jq \
-            >/dev/null 2>&1
+        apt-get install -y curl ca-certificates python3 iproute2 >/dev/null 2>&1
 
     elif command -v dnf >/dev/null 2>&1; then
-
-        dnf install -y \
-            curl \
-            wget \
-            ca-certificates \
-            unzip \
-            tar \
-            gzip \
-            iproute \
-            iptables \
-            python3 \
-            jq \
-            >/dev/null 2>&1
+        dnf install -y curl ca-certificates python3 iproute >/dev/null 2>&1
 
     elif command -v yum >/dev/null 2>&1; then
-
-        yum install -y \
-            curl \
-            wget \
-            ca-certificates \
-            unzip \
-            tar \
-            gzip \
-            iproute \
-            iptables \
-            python3 \
-            jq \
-            >/dev/null 2>&1
+        yum install -y curl ca-certificates python3 iproute >/dev/null 2>&1
 
     elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl ca-certificates python3 iproute2 >/dev/null 2>&1
 
-        apk add --no-cache \
-            curl \
-            wget \
-            ca-certificates \
-            unzip \
-            tar \
-            gzip \
-            iproute2 \
-            iptables \
-            python3 \
-            jq \
-            >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm curl ca-certificates python iproute2 >/dev/null 2>&1
     fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Python3 安装失败"
+        return 1
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "curl 安装失败"
+        return 1
+    fi
+
+    return 0
 }
 
-# =========================================================
-# 安装 sing-box
-# =========================================================
-
 install_singbox() {
+    clear
 
+    echo "======================================"
+    echo "        安装 / 更新 sing-box"
+    echo "======================================"
+    echo ""
+
+    install_basic || {
+        echo ""
+        echo "依赖安装失败"
+        read -r -p "按回车返回..."
+        return 1
+    }
+
+    echo "正在安装最新版 sing-box..."
+    echo ""
+
+    curl -fsSL https://sing-box.app/install.sh | sh
+
+    if command -v sing-box >/dev/null 2>&1; then
+        echo ""
+        echo "sing-box 安装成功"
+        echo ""
+        sing-box version
+    else
+        echo ""
+        echo "sing-box 安装失败"
+        read -r -p "按回车返回..."
+        return 1
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1
+
+    if systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
+        systemctl enable sing-box >/dev/null 2>&1
+    fi
+
+    echo ""
+    read -r -p "按回车返回..."
+}
+
+check_singbox() {
     if command -v sing-box >/dev/null 2>&1; then
         return 0
     fi
 
-    echo "正在安装 sing-box..."
+    clear
+
+    echo "系统中没有 sing-box"
+    echo ""
+    echo "正在自动安装..."
+    echo ""
+
+    install_basic || {
+        echo "依赖安装失败"
+        exit 1
+    }
 
     curl -fsSL https://sing-box.app/install.sh | sh
 
     if ! command -v sing-box >/dev/null 2>&1; then
-        echo -e "${RED}sing-box 安装失败${RESET}"
+        echo ""
+        echo "sing-box 安装失败"
         exit 1
     fi
+
+    systemctl daemon-reload >/dev/null 2>&1
 }
-
-# =========================================================
-# 判断是否 root
-# =========================================================
-
-check_root() {
-
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}请使用 root 用户运行${RESET}"
-        exit 1
-    fi
-}
-
-# =========================================================
-# 安装快捷命令
-# =========================================================
-
-install_shortcut() {
-
-    if [ -f "$0" ] && [ "$0" != "/dev/fd/63" ]; then
-
-        cp "$0" "$SCRIPT" >/dev/null 2>&1
-        chmod +x "$SCRIPT" >/dev/null 2>&1
-
-    fi
-
-    if [ ! -f "$SCRIPT" ]; then
-        return 0
-    fi
-
-    ln -sf "$SCRIPT" "$SHORTCUT"
-    chmod +x "$SCRIPT"
-}
-
-# =========================================================
-# 获取 SSH 客户端 IP
-# =========================================================
 
 get_ssh_client_ip() {
-
-    SSH_CLIENT_IP=""
+    SSH_IP=""
 
     if [ -n "${SSH_CLIENT:-}" ]; then
-        SSH_CLIENT_IP="$(echo "$SSH_CLIENT" | awk '{print $1}')"
+        SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}')
+    fi
+
+    if [ -z "$SSH_IP" ] && [ -n "${SSH_CONNECTION:-}" ]; then
+        SSH_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
     fi
 }
 
-# =========================================================
-# 生成 TUN 配置
-# =========================================================
-
-generate_config() {
-
-    local OUTBOUND_JSON="$1"
-
+build_exclude_json() {
     get_ssh_client_ip
 
-    local EXCLUDE='
+    EXCLUDE='
+        "192.168.0.0/16",
         "10.0.0.0/8",
         "172.16.0.0/12",
-        "192.168.0.0/16",
         "127.0.0.0/8",
         "169.254.0.0/16",
+        "224.0.0.0/4",
         "::1/128",
         "fc00::/7",
-        "fe80::/10"
+        "fe80::/10",
+        "ff00::/8"
     '
 
-    if [ -n "$SSH_CLIENT_IP" ]; then
-
-        if echo "$SSH_CLIENT_IP" | grep -q ':'; then
-            EXCLUDE="$EXCLUDE,
-        \"$SSH_CLIENT_IP/128\""
-        else
-            EXCLUDE="$EXCLUDE,
-        \"$SSH_CLIENT_IP/32\""
-        fi
-
+    if [ -n "$SSH_IP" ]; then
+        EXCLUDE="${EXCLUDE},"
+        EXCLUDE="${EXCLUDE}
+        \"${SSH_IP}/32\""
     fi
+}
+
+parse_vless() {
+    NODE="$1"
+    MODE="$2"
+
+    python3 - "$NODE" "$MODE" <<'PY'
+import sys
+import json
+from urllib.parse import urlsplit, parse_qs, unquote
+
+url = sys.argv[1]
+mode = sys.argv[2]
+
+try:
+    u = urlsplit(url)
+
+    if u.scheme.lower() != "vless":
+        raise Exception("不是 VLESS 链接")
+
+    if not u.hostname:
+        raise Exception("无法解析服务器地址")
+
+    uuid = u.username
+    server = u.hostname
+    port = u.port or 443
+
+    q = parse_qs(u.query)
+
+    def get(name, default=""):
+        value = q.get(name, [default])[0]
+        return unquote(value)
+
+    security = get("security", "")
+    transport_type = get("type", "")
+
+    obj = {
+        "type": "vless",
+        "tag": "proxy",
+        "server": server,
+        "server_port": port,
+        "uuid": uuid
+    }
+
+    if not uuid:
+        raise Exception("无法解析 UUID")
+
+    # ---------------------------------
+    # VLESS + WS + TLS
+    # ---------------------------------
+    if mode == "ws":
+
+        if security.lower() != "tls":
+            raise Exception("该链接不是 TLS 模式")
+
+        if transport_type.lower() != "ws":
+            raise Exception("该链接不是 WebSocket")
+
+        sni = get("sni", "")
+        fp = get("fp", "")
+        host = get("host", "")
+        path = get("path", "/")
+
+        tls = {
+            "enabled": True
+        }
+
+        if sni:
+            tls["server_name"] = sni
+
+        if fp:
+            tls["utls"] = {
+                "enabled": True,
+                "fingerprint": fp
+            }
+
+        obj["tls"] = tls
+
+        transport = {
+            "type": "ws",
+            "path": path
+        }
+
+        if host:
+            transport["headers"] = {
+                "Host": host
+            }
+
+        obj["transport"] = transport
+
+    # ---------------------------------
+    # VLESS + Reality
+    # ---------------------------------
+    elif mode == "reality":
+
+        if security.lower() != "reality":
+            raise Exception("该链接不是 Reality")
+
+        sni = get("sni", "")
+        fp = get("fp", "chrome")
+        pbk = get("pbk", "")
+        sid = get("sid", "")
+        flow = get("flow", "")
+
+        if not sni:
+            raise Exception("Reality 缺少 sni")
+
+        if not pbk:
+            raise Exception("Reality 缺少 pbk")
+
+        tls = {
+            "enabled": True,
+            "server_name": sni,
+            "utls": {
+                "enabled": True,
+                "fingerprint": fp
+            },
+            "reality": {
+                "enabled": True,
+                "public_key": pbk,
+                "short_id": sid
+            }
+        }
+
+        obj["tls"] = tls
+
+        if flow:
+            obj["flow"] = flow
+
+        if transport_type and transport_type.lower() != "tcp":
+            if transport_type.lower() == "grpc":
+                service_name = get("serviceName", "")
+                obj["transport"] = {
+                    "type": "grpc",
+                    "service_name": service_name
+                }
+
+    else:
+        raise Exception("未知 VLESS 模式")
+
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+except Exception as e:
+    print("ERROR:" + str(e))
+    sys.exit(1)
+PY
+}
+
+parse_socks() {
+    NODE="$1"
+
+    python3 - "$NODE" <<'PY'
+import sys
+import json
+from urllib.parse import urlsplit, unquote
+
+url = sys.argv[1]
+
+try:
+    u = urlsplit(url)
+
+    if u.scheme.lower() not in ("socks", "socks5"):
+        raise Exception("不是 SOCKS 链接")
+
+    if not u.hostname:
+        raise Exception("无法解析服务器地址")
+
+    obj = {
+        "type": "socks",
+        "tag": "proxy",
+        "server": u.hostname,
+        "server_port": u.port or 1080,
+        "version": "5"
+    }
+
+    if u.username:
+        obj["username"] = unquote(u.username)
+
+    if u.password:
+        obj["password"] = unquote(u.password)
+
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+except Exception as e:
+    print("ERROR:" + str(e))
+    sys.exit(1)
+PY
+}
+
+generate_config() {
+    PROXY_JSON="$1"
+
+    build_exclude_json
 
     cat > "$CONFIG" <<EOF
 {
   "log": {
-    "level": "warn",
-    "timestamp": true
+    "level": "warn"
   },
 
   "dns": {
@@ -229,15 +396,17 @@ generate_config() {
         "172.19.0.1/30",
         "fdfe:dcba:9876::1/126"
       ],
-      "mtu": 1500,
       "auto_route": true,
       "strict_route": true,
-      "stack": "system"
+      "stack": "system",
+      "route_exclude_address": [
+        $EXCLUDE
+      ]
     }
   ],
 
   "outbounds": [
-    $OUTBOUND_JSON,
+    $PROXY_JSON,
 
     {
       "type": "direct",
@@ -252,245 +421,17 @@ generate_config() {
 
   "route": {
     "auto_detect_interface": true,
-
-    "rules": [
-      {
-        "protocol": "dns",
-        "action": "hijack-dns"
-      }
-    ],
-
     "final": "proxy"
   }
 }
 EOF
 }
 
-# =========================================================
-# VLESS WS TLS 解析
-# =========================================================
-
-parse_vless_ws() {
-
-    local URL="$1"
-
-    python3 - "$URL" <<'PY' > "$WORKDIR/outbound.json"
-import sys
-from urllib.parse import urlsplit, parse_qs, unquote
-import json
-
-url = sys.argv[1]
-
-u = urlsplit(url)
-
-if u.scheme.lower() != "vless":
-    raise SystemExit("不是 VLESS 链接")
-
-q = parse_qs(u.query)
-
-uuid = unquote(u.username or "")
-server = u.hostname
-port = u.port or 443
-
-security = q.get("security", [""])[0].lower()
-transport = q.get("type", [""])[0].lower()
-
-if not uuid:
-    raise SystemExit("缺少 UUID")
-
-if not server:
-    raise SystemExit("缺少服务器地址")
-
-if security != "tls":
-    raise SystemExit("该链接不是 TLS")
-
-if transport != "ws":
-    raise SystemExit("该链接不是 WS")
-
-sni = q.get("sni", [server])[0]
-fp = q.get("fp", ["chrome"])[0]
-host = q.get("host", [sni])[0]
-path = unquote(q.get("path", ["/"])[0])
-
-obj = {
-    "type": "vless",
-    "tag": "proxy",
-    "server": server,
-    "server_port": port,
-    "uuid": uuid,
-    "tls": {
-        "enabled": True,
-        "server_name": sni,
-        "utls": {
-            "enabled": True,
-            "fingerprint": fp
-        }
-    },
-    "transport": {
-        "type": "ws",
-        "path": path,
-        "headers": {
-            "Host": host
-        }
-    }
+validate_config() {
+    sing-box check -c "$CONFIG"
 }
 
-flow = q.get("flow", [""])[0]
-
-if flow:
-    obj["flow"] = flow
-
-print(json.dumps(obj, ensure_ascii=False, indent=2))
-PY
-
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-
-    return 0
-}
-
-# =========================================================
-# VLESS Reality 解析
-# =========================================================
-
-parse_vless_reality() {
-
-    local URL="$1"
-
-    python3 - "$URL" <<'PY' > "$WORKDIR/outbound.json"
-import sys
-from urllib.parse import urlsplit, parse_qs, unquote
-import json
-
-url = sys.argv[1]
-
-u = urlsplit(url)
-
-if u.scheme.lower() != "vless":
-    raise SystemExit("不是 VLESS 链接")
-
-q = parse_qs(u.query)
-
-uuid = unquote(u.username or "")
-server = u.hostname
-port = u.port or 443
-
-security = q.get("security", [""])[0].lower()
-
-if security != "reality":
-    raise SystemExit("该链接不是 Reality")
-
-if not uuid:
-    raise SystemExit("缺少 UUID")
-
-if not server:
-    raise SystemExit("缺少服务器地址")
-
-sni = q.get("sni", [""])[0]
-fp = q.get("fp", ["chrome"])[0]
-pbk = q.get("pbk", [""])[0]
-sid = q.get("sid", [""])[0]
-flow = q.get("flow", [""])[0]
-
-if not sni:
-    raise SystemExit("Reality 缺少 SNI")
-
-if not pbk:
-    raise SystemExit("Reality 缺少公钥 pbk")
-
-obj = {
-    "type": "vless",
-    "tag": "proxy",
-    "server": server,
-    "server_port": port,
-    "uuid": uuid,
-    "tls": {
-        "enabled": True,
-        "server_name": sni,
-        "utls": {
-            "enabled": True,
-            "fingerprint": fp
-        },
-        "reality": {
-            "enabled": True,
-            "public_key": pbk
-        }
-    }
-}
-
-if sid:
-    obj["tls"]["reality"]["short_id"] = sid
-
-if flow:
-    obj["flow"] = flow
-
-print(json.dumps(obj, ensure_ascii=False, indent=2))
-PY
-
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-
-    return 0
-}
-
-# =========================================================
-# SOCKS5 解析
-# =========================================================
-
-parse_socks() {
-
-    local URL="$1"
-
-    python3 - "$URL" <<'PY' > "$WORKDIR/outbound.json"
-import sys
-from urllib.parse import urlsplit, unquote
-import json
-
-url = sys.argv[1]
-
-u = urlsplit(url)
-
-if u.scheme.lower() not in ["socks", "socks5"]:
-    raise SystemExit("不是 SOCKS5 链接")
-
-server = u.hostname
-port = u.port or 1080
-
-if not server:
-    raise SystemExit("缺少 SOCKS5 地址")
-
-obj = {
-    "type": "socks",
-    "tag": "proxy",
-    "server": server,
-    "server_port": port,
-    "version": "5"
-}
-
-if u.username:
-    obj["username"] = unquote(u.username)
-
-if u.password:
-    obj["password"] = unquote(u.password)
-
-print(json.dumps(obj, ensure_ascii=False, indent=2))
-PY
-
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-
-    return 0
-}
-
-# =========================================================
-# 安装/启动 sing-box 服务
-# =========================================================
-
-restart_service() {
-
+start_proxy() {
     systemctl daemon-reload >/dev/null 2>&1
 
     systemctl enable sing-box >/dev/null 2>&1
@@ -506,23 +447,27 @@ restart_service() {
     return 1
 }
 
-# =========================================================
-# 配置代理
-# =========================================================
+stop_proxy() {
+    systemctl stop sing-box >/dev/null 2>&1
+
+    if ip link show singtun0 >/dev/null 2>&1; then
+        ip link delete singtun0 >/dev/null 2>&1
+    fi
+}
 
 configure_proxy() {
-
     clear
 
-    echo "========================================"
-    echo "           选择代理类型"
-    echo "========================================"
-    echo
+    echo "======================================"
+    echo "             配置出口代理"
+    echo "======================================"
+    echo ""
     echo "1. VLESS + WS + TLS"
-    echo "2. SOCKS5"
-    echo "3. VLESS + Reality"
+    echo "2. VLESS + Reality"
+    echo "3. SOCKS5"
     echo "0. 返回"
-    echo
+    echo ""
+
     read -r -p "请选择: " TYPE
 
     clear
@@ -530,54 +475,90 @@ configure_proxy() {
     case "$TYPE" in
 
         1)
-
-            echo "========================================"
+            echo "======================================"
             echo "       VLESS + WS + TLS"
-            echo "========================================"
-            echo
-            read -r -p "请粘贴 VLESS 链接: " URL
+            echo "======================================"
+            echo ""
+            echo "请粘贴完整 VLESS 链接："
+            echo ""
 
-            if ! parse_vless_ws "$URL"; then
-                echo
-                echo -e "${RED}VLESS WS TLS 链接解析失败${RESET}"
+            read -r NODE
+
+            if [ -z "$NODE" ]; then
+                echo ""
+                echo "链接不能为空"
                 read -r -p "按回车返回..."
                 return
             fi
 
+            PROXY_JSON=$(parse_vless "$NODE" ws 2>&1)
+
+            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
+                echo ""
+                echo "解析失败："
+                echo "$PROXY_JSON"
+                read -r -p "按回车返回..."
+                return
+            fi
             ;;
 
         2)
+            echo "======================================"
+            echo "          VLESS + Reality"
+            echo "======================================"
+            echo ""
+            echo "请粘贴完整 VLESS Reality 链接："
+            echo ""
 
-            echo "========================================"
-            echo "              SOCKS5"
-            echo "========================================"
-            echo
-            read -r -p "请粘贴 SOCKS5 链接: " URL
+            read -r NODE
 
-            if ! parse_socks "$URL"; then
-                echo
-                echo -e "${RED}SOCKS5 链接解析失败${RESET}"
+            if [ -z "$NODE" ]; then
+                echo ""
+                echo "链接不能为空"
                 read -r -p "按回车返回..."
                 return
             fi
 
+            PROXY_JSON=$(parse_vless "$NODE" reality 2>&1)
+
+            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
+                echo ""
+                echo "解析失败："
+                echo "$PROXY_JSON"
+                read -r -p "按回车返回..."
+                return
+            fi
             ;;
 
         3)
+            echo "======================================"
+            echo "               SOCKS5"
+            echo "======================================"
+            echo ""
+            echo "支持："
+            echo "socks5://user:password@server:port"
+            echo ""
+            echo "请粘贴 SOCKS5 链接："
+            echo ""
 
-            echo "========================================"
-            echo "          VLESS + Reality"
-            echo "========================================"
-            echo
-            read -r -p "请粘贴 VLESS Reality 链接: " URL
+            read -r NODE
 
-            if ! parse_vless_reality "$URL"; then
-                echo
-                echo -e "${RED}VLESS Reality 链接解析失败${RESET}"
+            if [ -z "$NODE" ]; then
+                echo ""
+                echo "链接不能为空"
                 read -r -p "按回车返回..."
                 return
             fi
 
+            PROXY_JSON=$(parse_socks "$NODE" 2>&1)
+
+            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
+                echo ""
+                echo "解析失败："
+                echo "$PROXY_JSON"
+                read -r -p "按回车返回..."
+                return
+            fi
             ;;
 
         0)
@@ -586,231 +567,215 @@ configure_proxy() {
 
         *)
             echo "无效选择"
-            sleep 1
+            read -r -p "按回车返回..."
             return
             ;;
-
     esac
-
-    if [ ! -f "$WORKDIR/outbound.json" ]; then
-        echo
-        echo -e "${RED}代理配置生成失败${RESET}"
-        read -r -p "按回车返回..."
-        return
-    fi
 
     clear
 
-    echo "正在生成 sing-box 配置..."
+    echo "======================================"
+    echo "           正在生成配置"
+    echo "======================================"
+    echo ""
 
     if [ -f "$CONFIG" ]; then
         cp -f "$CONFIG" "$BACKUP"
     fi
 
-    OUTBOUND_JSON="$(cat "$WORKDIR/outbound.json")"
+    generate_config "$PROXY_JSON"
 
-    generate_config "$OUTBOUND_JSON"
+    echo "正在检查 sing-box 配置..."
+    echo ""
 
-    chmod 600 "$CONFIG"
-
-    echo "正在检查配置..."
-
-    if ! sing-box check -c "$CONFIG"; then
-
-        echo
-        echo -e "${RED}配置检查失败${RESET}"
+    if ! validate_config; then
+        echo ""
+        echo "配置检查失败"
 
         if [ -f "$BACKUP" ]; then
             cp -f "$BACKUP" "$CONFIG"
+            echo ""
+            echo "已恢复之前的配置"
         fi
-
-        rm -f "$WORKDIR/outbound.json"
 
         read -r -p "按回车返回..."
         return
     fi
 
-    echo
+    echo ""
     echo "配置检查通过"
-    echo "正在启动 sing-box..."
+    echo ""
+    echo "正在启动全局代理..."
 
-    if restart_service; then
+    if start_proxy; then
 
-        echo
-        echo -e "${GREEN}代理配置成功${RESET}"
-        echo
-        echo "当前 VPS 出口已通过 TUN 接管"
-        echo "sing-box 已设置为开机启动"
+        clear
+
+        echo "======================================"
+        echo "           配置完成"
+        echo "======================================"
+        echo ""
+        echo "全局代理：已开启"
+        echo "TUN：singtun0"
+        echo "配置文件：$CONFIG"
+
+        if [ -n "$SSH_IP" ]; then
+            echo ""
+            echo "当前 SSH 客户端已加入直连排除"
+        fi
+
+        echo ""
+        echo "当前出口由你刚才提供的节点负责"
+        echo ""
 
     else
 
-        echo
-        echo -e "${RED}sing-box 启动失败${RESET}"
-        echo
-        echo "查看日志："
-        echo "journalctl -u sing-box -n 50 --no-pager"
+        echo ""
+        echo "启动失败"
+        echo ""
+        echo "最近日志："
+        echo ""
+
+        journalctl -u sing-box -n 30 --no-pager 2>/dev/null
 
     fi
 
-    rm -f "$WORKDIR/outbound.json"
-
-    echo
-    read -r -p "按回车返回主菜单..."
+    echo ""
+    read -r -p "按回车返回..."
 }
-
-# =========================================================
-# 关闭全局代理
-# =========================================================
 
 disable_proxy() {
-
     clear
 
-    echo "正在关闭全局代理..."
+    echo "======================================"
+    echo "           关闭全局代理"
+    echo "======================================"
+    echo ""
 
-    systemctl stop sing-box >/dev/null 2>&1
+    stop_proxy
 
-    systemctl disable sing-box >/dev/null 2>&1
+    echo "全局代理已关闭"
+    echo ""
+    echo "sing-box 服务已停止"
+    echo ""
 
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    echo
-    echo -e "${GREEN}全局代理已关闭${RESET}"
-    echo
-
-    read -r -p "按回车返回主菜单..."
+    read -r -p "按回车返回..."
 }
 
-# =========================================================
-# 查看状态
-# =========================================================
-
 show_status() {
-
     clear
 
-    echo "========================================"
-    echo "              当前状态"
-    echo "========================================"
-    echo
+    echo "======================================"
+    echo "             当前状态"
+    echo "======================================"
+    echo ""
+
+    if command -v sing-box >/dev/null 2>&1; then
+        echo "sing-box：已安装"
+        echo "版本："
+        sing-box version | head -n 1
+    else
+        echo "sing-box：未安装"
+    fi
+
+    echo ""
 
     if systemctl is-active --quiet sing-box; then
-        echo -e "sing-box：${GREEN}运行中${RESET}"
+        echo "代理状态：运行中"
     else
-        echo -e "sing-box：${RED}未运行${RESET}"
+        echo "代理状态：未运行"
     fi
 
-    echo
+    echo ""
 
     if ip link show singtun0 >/dev/null 2>&1; then
-        echo -e "TUN：${GREEN}已创建${RESET}"
+        echo "TUN：singtun0"
+        echo "TUN 状态：存在"
     else
-        echo -e "TUN：${RED}不存在${RESET}"
+        echo "TUN：不存在"
     fi
 
-    echo
+    echo ""
 
     if [ -f "$CONFIG" ]; then
-        echo "配置文件：$CONFIG"
+        echo "配置文件：存在"
     else
         echo "配置文件：不存在"
     fi
 
-    echo
+    echo ""
 
-    if [ -f "$CONFIG" ]; then
-
-        echo "当前代理："
-
-        python3 - "$CONFIG" <<'PY'
-import json
-
-try:
-    with open("/etc/sing-box/config.json", "r") as f:
-        c = json.load(f)
-
-    for o in c.get("outbounds", []):
-        if o.get("tag") == "proxy":
-            print("类型：", o.get("type", "未知"))
-            print("服务器：", o.get("server", "未知"))
-            print("端口：", o.get("server_port", "未知"))
-
-            if o.get("transport"):
-                print("传输：", o["transport"].get("type", "未知"))
-
-            tls = o.get("tls", {})
-
-            if tls.get("enabled"):
-                print("TLS：已启用")
-
-            if tls.get("reality", {}).get("enabled"):
-                print("Reality：已启用")
-
-except Exception:
-    print("配置读取失败")
-PY
-
+    if systemctl is-active --quiet sing-box; then
+        echo "最近日志："
+        echo ""
+        journalctl -u sing-box -n 15 --no-pager 2>/dev/null
     fi
 
-    echo
-    echo "最近日志："
-    echo "----------------------------------------"
-
-    journalctl -u sing-box -n 15 --no-pager 2>/dev/null
-
-    echo "----------------------------------------"
-    echo
-
-    read -r -p "按回车返回主菜单..."
+    echo ""
+    read -r -p "按回车返回..."
 }
 
-# =========================================================
-# 卸载
-# =========================================================
+install_shortcuts() {
+    cp -f "$0" "$INSTALL_PATH" 2>/dev/null || true
+    chmod +x "$INSTALL_PATH" 2>/dev/null || true
 
-uninstall_proxy() {
-
-    clear
-
-    echo "正在停止 sing-box..."
-
-    systemctl stop sing-box >/dev/null 2>&1 || true
-    systemctl disable sing-box >/dev/null 2>&1 || true
-
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    rm -f "$CONFIG"
-    rm -f "$SHORTCUT"
-    rm -f "$SCRIPT"
-
-    echo
-    echo "全局代理配置已删除"
-    echo
-    read -r -p "按回车退出..."
-    exit 0
+    ln -sf "$INSTALL_PATH" "$OUT_PATH"
 }
 
-# =========================================================
-# 主菜单
-# =========================================================
+initial_install() {
+
+    mkdir -p /etc/sing-box
+    mkdir -p /etc/vps-out
+
+    if ! command -v curl >/dev/null 2>&1 ||
+       ! command -v python3 >/dev/null 2>&1; then
+
+        install_basic || {
+            echo ""
+            echo "基础依赖安装失败"
+            exit 1
+        }
+    fi
+
+    if ! command -v sing-box >/dev/null 2>&1; then
+
+        echo ""
+        echo "未检测到 sing-box"
+        echo "正在自动安装..."
+        echo ""
+
+        curl -fsSL https://sing-box.app/install.sh | sh
+
+        if ! command -v sing-box >/dev/null 2>&1; then
+            echo ""
+            echo "sing-box 自动安装失败"
+            exit 1
+        fi
+
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+
+    install_shortcuts
+}
+
+initial_install
 
 while true
 do
-
     clear
 
-    echo "========================================"
-    echo "             VPS 全局代理"
-    echo "========================================"
-    echo
-    echo "1. 配置代理"
+    echo "======================================"
+    echo "          VPS 全局出口代理"
+    echo "======================================"
+    echo ""
+    echo "1. 配置出口代理"
     echo "2. 关闭全局代理"
-    echo "3. 查看状态"
-    echo "4. 卸载脚本"
+    echo "3. 查看当前状态"
+    echo "4. 安装 / 更新 sing-box"
     echo "0. 退出"
-    echo
+    echo ""
     echo "快捷命令：out"
-    echo
+    echo ""
 
     read -r -p "请选择: " CHOICE
 
@@ -831,7 +796,7 @@ do
             ;;
 
         4)
-            uninstall_proxy
+            install_singbox
             ;;
 
         0)
@@ -843,7 +808,5 @@ do
             echo "无效选择"
             sleep 1
             ;;
-
     esac
-
 done
