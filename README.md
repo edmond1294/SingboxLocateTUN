@@ -100,6 +100,8 @@ ss://method:password@example.com:8388
 SS2022：
 
 ss://2022-blake3-aes-256-gcm:KEY@example.com:8388
+
+
 工作原理
 
 脚本主要通过 sing-box TUN 模式接管 VPS 的网络流量：
