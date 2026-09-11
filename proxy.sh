@@ -1,191 +1,246 @@
 #!/bin/bash
 
+# =========================================================
+# VPS 全局代理管理脚本
+# 支持：
+# 1. VLESS + WS + TLS
+# 2. SOCKS5
+# 3. VLESS + Reality
+# =========================================================
+
 CONFIG="/etc/sing-box/config.json"
 BACKUP="/etc/sing-box/config.json.bak"
-INSTALL_PATH="/usr/local/bin/vps-out"
-OUT_PATH="/usr/local/bin/out"
+BIN="/usr/local/bin/vps-out"
+SHORTCUT="/usr/local/bin/out"
 
-SCRIPT_NAME="VPS 全局出口代理"
+TUN_NAME="singtun0"
 
-RED=""
-GREEN=""
-YELLOW=""
-BLUE=""
-RESET=""
+# ---------------------------------------------------------
+# 基础函数
+# ---------------------------------------------------------
 
-if [ -t 1 ]; then
-    RED="\033[31m"
-    GREEN="\033[32m"
-    YELLOW="\033[33m"
-    BLUE="\033[36m"
-    RESET="\033[0m"
-fi
-
-if [ "$(id -u)" != "0" ]; then
-    echo "请使用 root 用户运行此脚本"
-    exit 1
-fi
-
-mkdir -p /etc/sing-box
-mkdir -p /etc/vps-out
-
-clear
-
-echo "======================================"
-echo "        VPS 全局出口代理"
-echo "======================================"
-echo ""
-
-install_basic() {
-    echo "正在检查系统依赖..."
-
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y curl ca-certificates python3 iproute2 >/dev/null 2>&1
-
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl ca-certificates python3 iproute >/dev/null 2>&1
-
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl ca-certificates python3 iproute >/dev/null 2>&1
-
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl ca-certificates python3 iproute2 >/dev/null 2>&1
-
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm curl ca-certificates python iproute2 >/dev/null 2>&1
-    fi
-
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "Python3 安装失败"
-        return 1
-    fi
-
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "curl 安装失败"
-        return 1
-    fi
-
-    return 0
+pause() {
+    echo
+    read -r -p "按回车继续..." _
 }
 
-install_singbox() {
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo "请使用 root 用户运行此脚本。"
+        exit 1
+    fi
+}
+
+clear_screen() {
     clear
+}
 
-    echo "======================================"
+# ---------------------------------------------------------
+# 检测系统
+# ---------------------------------------------------------
+
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS="$ID"
+        VERSION="$VERSION_ID"
+    else
+        OS="unknown"
+    fi
+}
+
+# ---------------------------------------------------------
+# 安装基础依赖
+# ---------------------------------------------------------
+
+install_dependencies() {
+
+    detect_os
+
+    echo "正在安装基础依赖..."
+
+    case "$OS" in
+
+        ubuntu|debian)
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update -y
+
+            apt-get install -y \
+                curl \
+                wget \
+                jq \
+                python3 \
+                iproute2 \
+                ca-certificates \
+                unzip \
+                tar
+            ;;
+
+        centos|rhel|rocky|almalinux|fedora)
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y \
+                    curl \
+                    wget \
+                    jq \
+                    python3 \
+                    iproute \
+                    ca-certificates \
+                    unzip \
+                    tar
+            else
+                yum install -y \
+                    curl \
+                    wget \
+                    jq \
+                    python3 \
+                    iproute \
+                    ca-certificates \
+                    unzip \
+                    tar
+            fi
+            ;;
+
+        alpine)
+            apk update
+            apk add \
+                curl \
+                wget \
+                jq \
+                python3 \
+                iproute2 \
+                ca-certificates \
+                unzip \
+                tar
+            ;;
+
+        *)
+            echo "无法自动识别系统：$OS"
+            echo "请手动安装：curl wget jq python3 iproute2"
+            return 1
+            ;;
+    esac
+
+    echo "基础依赖安装完成。"
+}
+
+# ---------------------------------------------------------
+# 安装 / 更新 sing-box
+# ---------------------------------------------------------
+
+install_singbox() {
+
+    clear_screen
+
+    echo "========================================"
     echo "        安装 / 更新 sing-box"
-    echo "======================================"
-    echo ""
+    echo "========================================"
+    echo
 
-    install_basic || {
-        echo ""
-        echo "依赖安装失败"
-        read -r -p "按回车返回..."
+    install_dependencies || {
+        echo
+        echo "基础依赖安装失败。"
+        pause
         return 1
     }
 
-    echo "正在安装最新版 sing-box..."
-    echo ""
+    echo
+    echo "正在安装 / 更新最新版 sing-box..."
+    echo
 
-    curl -fsSL https://sing-box.app/install.sh | sh
-
-    if command -v sing-box >/dev/null 2>&1; then
-        echo ""
-        echo "sing-box 安装成功"
-        echo ""
-        sing-box version
-    else
-        echo ""
-        echo "sing-box 安装失败"
-        read -r -p "按回车返回..."
+    if ! curl -fsSL https://sing-box.app/install.sh | sh; then
+        echo
+        echo "sing-box 安装失败。"
+        pause
         return 1
     fi
 
-    systemctl daemon-reload >/dev/null 2>&1
+    mkdir -p /etc/sing-box
+    mkdir -p /etc/vps-out
 
-    if systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
-        systemctl enable sing-box >/dev/null 2>&1
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1
     fi
 
-    echo ""
-    read -r -p "按回车返回..."
+    if command -v sing-box >/dev/null 2>&1; then
+        echo
+        echo "sing-box 安装成功。"
+        echo
+        sing-box version
+    else
+        echo
+        echo "没有找到 sing-box 命令。"
+        pause
+        return 1
+    fi
+
+    echo
+    echo "安装完成。"
+    pause
 }
 
+# ---------------------------------------------------------
+# 检查 sing-box
+# ---------------------------------------------------------
+
 check_singbox() {
+
     if command -v sing-box >/dev/null 2>&1; then
         return 0
     fi
 
-    clear
-
-    echo "系统中没有 sing-box"
-    echo ""
-    echo "正在自动安装..."
-    echo ""
-
-    install_basic || {
-        echo "依赖安装失败"
-        exit 1
-    }
-
-    curl -fsSL https://sing-box.app/install.sh | sh
-
-    if ! command -v sing-box >/dev/null 2>&1; then
-        echo ""
-        echo "sing-box 安装失败"
-        exit 1
-    fi
-
-    systemctl daemon-reload >/dev/null 2>&1
+    echo "未检测到 sing-box。"
+    echo "请先使用菜单中的「安装 / 更新 sing-box」。"
+    pause
+    return 1
 }
 
-get_ssh_client_ip() {
-    SSH_IP=""
+# ---------------------------------------------------------
+# 安装快捷命令
+# ---------------------------------------------------------
 
-    if [ -n "${SSH_CLIENT:-}" ]; then
-        SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}')
+install_shortcut() {
+
+    mkdir -p /usr/local/bin
+
+    if [ -f "$0" ] && [ "$0" != "/dev/stdin" ] && [ "$0" != "/dev/fd/63" ]; then
+
+        cp "$0" "$BIN" 2>/dev/null
+
+        if [ -f "$BIN" ]; then
+            chmod +x "$BIN"
+        fi
+
     fi
 
-    if [ -z "$SSH_IP" ] && [ -n "${SSH_CONNECTION:-}" ]; then
-        SSH_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+    if [ ! -x "$BIN" ]; then
+        cat > "$BIN" <<'EOF'
+#!/bin/bash
+exec /usr/local/bin/vps-out
+EOF
+        chmod +x "$BIN"
     fi
+
+    ln -sf "$BIN" "$SHORTCUT"
+    chmod +x "$SHORTCUT"
 }
 
-build_exclude_json() {
-    get_ssh_client_ip
-
-    EXCLUDE='
-        "192.168.0.0/16",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "127.0.0.0/8",
-        "169.254.0.0/16",
-        "224.0.0.0/4",
-        "::1/128",
-        "fc00::/7",
-        "fe80::/10",
-        "ff00::/8"
-    '
-
-    if [ -n "$SSH_IP" ]; then
-        EXCLUDE="${EXCLUDE},"
-        EXCLUDE="${EXCLUDE}
-        \"${SSH_IP}/32\""
-    fi
-}
+# ---------------------------------------------------------
+# Python URL 解析
+# ---------------------------------------------------------
 
 parse_vless() {
-    NODE="$1"
-    MODE="$2"
 
-    python3 - "$NODE" "$MODE" <<'PY'
+    local URL="$1"
+    local OUTPUT="$2"
+
+    python3 - "$URL" "$OUTPUT" <<'PY'
 import sys
 import json
 from urllib.parse import urlsplit, parse_qs, unquote
 
 url = sys.argv[1]
-mode = sys.argv[2]
+output = sys.argv[2]
 
 try:
     u = urlsplit(url)
@@ -194,20 +249,26 @@ try:
         raise Exception("不是 VLESS 链接")
 
     if not u.hostname:
-        raise Exception("无法解析服务器地址")
+        raise Exception("缺少服务器地址")
 
-    uuid = u.username
-    server = u.hostname
-    port = u.port or 443
+    if not u.port:
+        raise Exception("缺少服务器端口")
+
+    uuid = unquote(u.username or "")
+
+    if not uuid:
+        raise Exception("缺少 UUID")
 
     q = parse_qs(u.query)
 
     def get(name, default=""):
-        value = q.get(name, [default])[0]
-        return unquote(value)
+        return unquote(q.get(name, [default])[0])
 
-    security = get("security", "")
-    transport_type = get("type", "")
+    security = get("security", "").lower()
+    transport = get("type", "tcp").lower()
+
+    server = u.hostname
+    port = u.port
 
     obj = {
         "type": "vless",
@@ -217,31 +278,22 @@ try:
         "uuid": uuid
     }
 
-    if not uuid:
-        raise Exception("无法解析 UUID")
+    # -----------------------------------------------------
+    # TLS
+    # -----------------------------------------------------
 
-    # ---------------------------------
-    # VLESS + WS + TLS
-    # ---------------------------------
-    if mode == "ws":
-
-        if security.lower() != "tls":
-            raise Exception("该链接不是 TLS 模式")
-
-        if transport_type.lower() != "ws":
-            raise Exception("该链接不是 WebSocket")
-
-        sni = get("sni", "")
-        fp = get("fp", "")
-        host = get("host", "")
-        path = get("path", "/")
+    if security == "tls":
 
         tls = {
             "enabled": True
         }
 
+        sni = get("sni")
+
         if sni:
             tls["server_name"] = sni
+
+        fp = get("fp")
 
         if fp:
             tls["utls"] = {
@@ -249,87 +301,157 @@ try:
                 "fingerprint": fp
             }
 
+        alpn = get("alpn")
+
+        if alpn:
+            tls["alpn"] = [
+                x.strip()
+                for x in alpn.split(",")
+                if x.strip()
+            ]
+
         obj["tls"] = tls
 
-        transport = {
-            "type": "ws",
-            "path": path
-        }
+    # -----------------------------------------------------
+    # Reality
+    # -----------------------------------------------------
 
-        if host:
-            transport["headers"] = {
-                "Host": host
-            }
-
-        obj["transport"] = transport
-
-    # ---------------------------------
-    # VLESS + Reality
-    # ---------------------------------
-    elif mode == "reality":
-
-        if security.lower() != "reality":
-            raise Exception("该链接不是 Reality")
-
-        sni = get("sni", "")
-        fp = get("fp", "chrome")
-        pbk = get("pbk", "")
-        sid = get("sid", "")
-        flow = get("flow", "")
-
-        if not sni:
-            raise Exception("Reality 缺少 sni")
-
-        if not pbk:
-            raise Exception("Reality 缺少 pbk")
+    elif security == "reality":
 
         tls = {
-            "enabled": True,
-            "server_name": sni,
-            "utls": {
-                "enabled": True,
-                "fingerprint": fp
-            },
-            "reality": {
-                "enabled": True,
-                "public_key": pbk,
-                "short_id": sid
-            }
+            "enabled": True
         }
 
+        sni = get("sni")
+
+        if sni:
+            tls["server_name"] = sni
+
+        fp = get("fp")
+
+        if fp:
+            tls["utls"] = {
+                "enabled": True,
+                "fingerprint": fp
+            }
+
+        pbk = get("pbk")
+
+        if not pbk:
+            raise Exception("Reality 缺少 pbk 公钥")
+
+        reality = {
+            "enabled": True,
+            "public_key": pbk
+        }
+
+        sid = get("sid")
+
+        if sid:
+            reality["short_id"] = sid
+
+        tls["reality"] = reality
+
         obj["tls"] = tls
+
+        flow = get("flow")
 
         if flow:
             obj["flow"] = flow
 
-        if transport_type and transport_type.lower() != "tcp":
-            if transport_type.lower() == "grpc":
-                service_name = get("serviceName", "")
-                obj["transport"] = {
-                    "type": "grpc",
-                    "service_name": service_name
-                }
+    # -----------------------------------------------------
+    # WS
+    # -----------------------------------------------------
 
-    else:
-        raise Exception("未知 VLESS 模式")
+    if transport == "ws":
 
-    print(json.dumps(obj, ensure_ascii=False, indent=2))
+        path = get("path", "/")
+
+        transport_obj = {
+            "type": "ws",
+            "path": path
+        }
+
+        host = get("host")
+
+        if host:
+            transport_obj["headers"] = {
+                "Host": host
+            }
+
+        obj["transport"] = transport_obj
+
+    # -----------------------------------------------------
+    # TCP
+    # -----------------------------------------------------
+
+    elif transport in ("tcp", "raw"):
+
+        # TCP 不需要 transport 配置
+        pass
+
+    # -----------------------------------------------------
+    # HTTP
+    # -----------------------------------------------------
+
+    elif transport == "http":
+
+        obj["transport"] = {
+            "type": "http"
+        }
+
+        host = get("host")
+
+        if host:
+            obj["transport"]["host"] = [
+                host
+            ]
+
+        path = get("path")
+
+        if path:
+            obj["transport"]["path"] = path
+
+    # -----------------------------------------------------
+    # flow
+    # -----------------------------------------------------
+
+    flow = get("flow")
+
+    if flow and "flow" not in obj:
+        obj["flow"] = flow
+
+    with open(output, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
 
 except Exception as e:
     print("ERROR:" + str(e))
     sys.exit(1)
 PY
+
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    return 0
 }
 
-parse_socks() {
-    NODE="$1"
+# ---------------------------------------------------------
+# 解析 SOCKS5
+# ---------------------------------------------------------
 
-    python3 - "$NODE" <<'PY'
+parse_socks() {
+
+    local URL="$1"
+    local OUTPUT="$2"
+
+    python3 - "$URL" "$OUTPUT" <<'PY'
 import sys
 import json
 from urllib.parse import urlsplit, unquote
 
 url = sys.argv[1]
+output = sys.argv[2]
 
 try:
     u = urlsplit(url)
@@ -338,13 +460,16 @@ try:
         raise Exception("不是 SOCKS 链接")
 
     if not u.hostname:
-        raise Exception("无法解析服务器地址")
+        raise Exception("缺少 SOCKS5 服务器地址")
+
+    if not u.port:
+        raise Exception("缺少 SOCKS5 端口")
 
     obj = {
         "type": "socks",
         "tag": "proxy",
         "server": u.hostname,
-        "server_port": u.port or 1080,
+        "server_port": u.port,
         "version": "5"
     }
 
@@ -354,23 +479,47 @@ try:
     if u.password:
         obj["password"] = unquote(u.password)
 
-    print(json.dumps(obj, ensure_ascii=False, indent=2))
+    with open(output, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
 
 except Exception as e:
     print("ERROR:" + str(e))
     sys.exit(1)
 PY
+
+    [ $? -eq 0 ]
 }
 
-generate_config() {
-    PROXY_JSON="$1"
+# ---------------------------------------------------------
+# 获取当前 SSH 客户端 IP
+# ---------------------------------------------------------
 
-    build_exclude_json
+get_ssh_client_ip() {
+
+    SSH_IP=""
+
+    if [ -n "${SSH_CLIENT:-}" ]; then
+        SSH_IP="$(echo "$SSH_CLIENT" | awk '{print $1}')"
+    fi
+}
+
+# ---------------------------------------------------------
+# 生成完整 sing-box 配置
+# ---------------------------------------------------------
+
+build_config() {
+
+    local OUTBOUND="$1"
+
+    get_ssh_client_ip
+
+    mkdir -p /etc/sing-box
 
     cat > "$CONFIG" <<EOF
 {
   "log": {
-    "level": "warn"
+    "level": "warn",
+    "timestamp": true
   },
 
   "dns": {
@@ -391,22 +540,19 @@ generate_config() {
     {
       "type": "tun",
       "tag": "tun-in",
-      "interface_name": "singtun0",
+      "interface_name": "$TUN_NAME",
       "address": [
         "172.19.0.1/30",
         "fdfe:dcba:9876::1/126"
       ],
       "auto_route": true,
       "strict_route": true,
-      "stack": "system",
-      "route_exclude_address": [
-        $EXCLUDE
-      ]
+      "stack": "system"
     }
   ],
 
   "outbounds": [
-    $PROXY_JSON,
+    $OUTBOUND,
 
     {
       "type": "direct",
@@ -416,22 +562,149 @@ generate_config() {
     {
       "type": "block",
       "tag": "block"
+    },
+
+    {
+      "type": "dns",
+      "tag": "dns-out"
     }
   ],
 
   "route": {
     "auto_detect_interface": true,
-    "final": "proxy"
+    "final": "proxy",
+    "rules": [
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      }
+    ]
   }
 }
 EOF
+
+    # -----------------------------------------------------
+    # 当前 SSH 客户端加入 TUN 排除
+    # 防止重新路由导致 SSH 断线
+    # -----------------------------------------------------
+
+    if [ -n "$SSH_IP" ]; then
+
+        python3 - "$CONFIG" "$SSH_IP" <<'PY'
+import sys
+import json
+
+config = sys.argv[1]
+ip = sys.argv[2]
+
+with open(config, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+tun = data["inbounds"][0]
+
+if "route_exclude_address" not in tun:
+    tun["route_exclude_address"] = []
+
+if ip not in tun["route_exclude_address"]:
+    tun["route_exclude_address"].append(ip)
+
+with open(config, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+
+    fi
 }
 
-validate_config() {
+# ---------------------------------------------------------
+# 写入代理 outbound
+# ---------------------------------------------------------
+
+make_vless_outbound() {
+
+    local NODE="$1"
+    local TEMP="/tmp/vps-out-vless.json"
+
+    rm -f "$TEMP"
+
+    if ! parse_vless "$NODE" "$TEMP"; then
+        echo "VLESS 链接解析失败。"
+        rm -f "$TEMP"
+        return 1
+    fi
+
+    if ! jq empty "$TEMP" >/dev/null 2>&1; then
+        echo "VLESS 配置生成失败。"
+        rm -f "$TEMP"
+        return 1
+    fi
+
+    build_config "$(jq -c '.' "$TEMP")"
+
+    rm -f "$TEMP"
+
+    return 0
+}
+
+make_socks_outbound() {
+
+    local NODE="$1"
+    local TEMP="/tmp/vps-out-socks.json"
+
+    rm -f "$TEMP"
+
+    if ! parse_socks "$NODE" "$TEMP"; then
+        echo "SOCKS5 链接解析失败。"
+        rm -f "$TEMP"
+        return 1
+    fi
+
+    if ! jq empty "$TEMP" >/dev/null 2>&1; then
+        echo "SOCKS5 配置生成失败。"
+        rm -f "$TEMP"
+        return 1
+    fi
+
+    build_config "$(jq -c '.' "$TEMP")"
+
+    rm -f "$TEMP"
+
+    return 0
+}
+
+# ---------------------------------------------------------
+# 检查配置
+# ---------------------------------------------------------
+
+check_config() {
+
+    if ! command -v sing-box >/dev/null 2>&1; then
+        echo "未安装 sing-box。"
+        return 1
+    fi
+
+    if [ ! -f "$CONFIG" ]; then
+        echo "配置文件不存在。"
+        return 1
+    fi
+
+    echo "正在检查 sing-box 配置..."
+    echo
+
     sing-box check -c "$CONFIG"
 }
 
+# ---------------------------------------------------------
+# 启动代理
+# ---------------------------------------------------------
+
 start_proxy() {
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "当前系统没有 systemd。"
+        return 1
+    fi
+
     systemctl daemon-reload >/dev/null 2>&1
 
     systemctl enable sing-box >/dev/null 2>&1
@@ -447,255 +720,343 @@ start_proxy() {
     return 1
 }
 
-stop_proxy() {
-    systemctl stop sing-box >/dev/null 2>&1
+# ---------------------------------------------------------
+# 配置 VLESS
+# ---------------------------------------------------------
 
-    if ip link show singtun0 >/dev/null 2>&1; then
-        ip link delete singtun0 >/dev/null 2>&1
+config_vless() {
+
+    clear_screen
+
+    echo "========================================"
+    echo "        VLESS 节点配置"
+    echo "========================================"
+    echo
+    echo "支持："
+    echo "VLESS + WS + TLS"
+    echo "VLESS + Reality"
+    echo
+    echo "请粘贴完整 VLESS 链接："
+    echo
+
+    read -r NODE
+
+    clear_screen
+
+    if [ -z "$NODE" ]; then
+        echo "没有输入节点。"
+        pause
+        return
     fi
-}
 
-configure_proxy() {
-    clear
-
-    echo "======================================"
-    echo "             配置出口代理"
-    echo "======================================"
-    echo ""
-    echo "1. VLESS + WS + TLS"
-    echo "2. VLESS + Reality"
-    echo "3. SOCKS5"
-    echo "0. 返回"
-    echo ""
-
-    read -r -p "请选择: " TYPE
-
-    clear
-
-    case "$TYPE" in
-
-        1)
-            echo "======================================"
-            echo "       VLESS + WS + TLS"
-            echo "======================================"
-            echo ""
-            echo "请粘贴完整 VLESS 链接："
-            echo ""
-
-            read -r NODE
-
-            if [ -z "$NODE" ]; then
-                echo ""
-                echo "链接不能为空"
-                read -r -p "按回车返回..."
-                return
-            fi
-
-            PROXY_JSON=$(parse_vless "$NODE" ws 2>&1)
-
-            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
-                echo ""
-                echo "解析失败："
-                echo "$PROXY_JSON"
-                read -r -p "按回车返回..."
-                return
-            fi
+    case "$NODE" in
+        vless://*)
             ;;
-
-        2)
-            echo "======================================"
-            echo "          VLESS + Reality"
-            echo "======================================"
-            echo ""
-            echo "请粘贴完整 VLESS Reality 链接："
-            echo ""
-
-            read -r NODE
-
-            if [ -z "$NODE" ]; then
-                echo ""
-                echo "链接不能为空"
-                read -r -p "按回车返回..."
-                return
-            fi
-
-            PROXY_JSON=$(parse_vless "$NODE" reality 2>&1)
-
-            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
-                echo ""
-                echo "解析失败："
-                echo "$PROXY_JSON"
-                read -r -p "按回车返回..."
-                return
-            fi
-            ;;
-
-        3)
-            echo "======================================"
-            echo "               SOCKS5"
-            echo "======================================"
-            echo ""
-            echo "支持："
-            echo "socks5://user:password@server:port"
-            echo ""
-            echo "请粘贴 SOCKS5 链接："
-            echo ""
-
-            read -r NODE
-
-            if [ -z "$NODE" ]; then
-                echo ""
-                echo "链接不能为空"
-                read -r -p "按回车返回..."
-                return
-            fi
-
-            PROXY_JSON=$(parse_socks "$NODE" 2>&1)
-
-            if echo "$PROXY_JSON" | grep -q "^ERROR:"; then
-                echo ""
-                echo "解析失败："
-                echo "$PROXY_JSON"
-                read -r -p "按回车返回..."
-                return
-            fi
-            ;;
-
-        0)
-            return
-            ;;
-
         *)
-            echo "无效选择"
-            read -r -p "按回车返回..."
+            echo "错误：请输入 vless:// 开头的链接。"
+            pause
             return
             ;;
     esac
 
-    clear
+    check_singbox || return
 
-    echo "======================================"
-    echo "           正在生成配置"
-    echo "======================================"
-    echo ""
+    mkdir -p /etc/sing-box
 
     if [ -f "$CONFIG" ]; then
-        cp -f "$CONFIG" "$BACKUP"
+        cp "$CONFIG" "$BACKUP"
     fi
 
-    generate_config "$PROXY_JSON"
+    echo "正在解析 VLESS 节点..."
+    echo
 
-    echo "正在检查 sing-box 配置..."
-    echo ""
+    if ! make_vless_outbound "$NODE"; then
 
-    if ! validate_config; then
-        echo ""
-        echo "配置检查失败"
+        echo
+        echo "配置生成失败。"
 
         if [ -f "$BACKUP" ]; then
-            cp -f "$BACKUP" "$CONFIG"
-            echo ""
-            echo "已恢复之前的配置"
+            cp "$BACKUP" "$CONFIG"
         fi
 
-        read -r -p "按回车返回..."
+        pause
         return
     fi
 
-    echo ""
-    echo "配置检查通过"
-    echo ""
+    echo "正在检查配置..."
+    echo
+
+    if ! check_config; then
+
+        echo
+        echo "配置检查失败。"
+
+        if [ -f "$BACKUP" ]; then
+            cp "$BACKUP" "$CONFIG"
+            echo "已恢复之前的配置。"
+        fi
+
+        pause
+        return
+    fi
+
+    echo
+    echo "配置检查通过。"
+    echo
     echo "正在启动全局代理..."
 
     if start_proxy; then
 
-        clear
+        echo
+        echo "========================================"
+        echo "全局代理已开启"
+        echo "========================================"
 
-        echo "======================================"
-        echo "           配置完成"
-        echo "======================================"
-        echo ""
-        echo "全局代理：已开启"
-        echo "TUN：singtun0"
-        echo "配置文件：$CONFIG"
+    else
 
-        if [ -n "$SSH_IP" ]; then
-            echo ""
-            echo "当前 SSH 客户端已加入直连排除"
+        echo
+        echo "sing-box 启动失败。"
+        echo
+        echo "查看日志："
+        echo "journalctl -u sing-box -n 50 --no-pager"
+    fi
+
+    pause
+}
+
+# ---------------------------------------------------------
+# 配置 SOCKS5
+# ---------------------------------------------------------
+
+config_socks() {
+
+    clear_screen
+
+    echo "========================================"
+    echo "          SOCKS5 节点配置"
+    echo "========================================"
+    echo
+    echo "支持格式："
+    echo
+    echo "socks5://用户名:密码@服务器:端口"
+    echo "socks5://服务器:端口"
+    echo
+    echo "请粘贴完整 SOCKS5 链接："
+    echo
+
+    read -r NODE
+
+    clear_screen
+
+    if [ -z "$NODE" ]; then
+        echo "没有输入节点。"
+        pause
+        return
+    fi
+
+    case "$NODE" in
+        socks5://*|socks://*)
+            ;;
+        *)
+            echo "错误：请输入 socks5:// 或 socks:// 开头的链接。"
+            pause
+            return
+            ;;
+    esac
+
+    check_singbox || return
+
+    mkdir -p /etc/sing-box
+
+    if [ -f "$CONFIG" ]; then
+        cp "$CONFIG" "$BACKUP"
+    fi
+
+    echo "正在解析 SOCKS5 节点..."
+    echo
+
+    if ! make_socks_outbound "$NODE"; then
+
+        echo
+        echo "配置生成失败。"
+
+        if [ -f "$BACKUP" ]; then
+            cp "$BACKUP" "$CONFIG"
         fi
 
-        echo ""
-        echo "当前出口由你刚才提供的节点负责"
-        echo ""
+        pause
+        return
+    fi
+
+    echo "正在检查配置..."
+    echo
+
+    if ! check_config; then
+
+        echo
+        echo "配置检查失败。"
+
+        if [ -f "$BACKUP" ]; then
+            cp "$BACKUP" "$CONFIG"
+            echo "已恢复之前的配置。"
+        fi
+
+        pause
+        return
+    fi
+
+    echo
+    echo "配置检查通过。"
+    echo
+    echo "正在启动全局代理..."
+
+    if start_proxy; then
+
+        echo
+        echo "========================================"
+        echo "全局代理已开启"
+        echo "========================================"
 
     else
 
-        echo ""
-        echo "启动失败"
-        echo ""
-        echo "最近日志："
-        echo ""
-
-        journalctl -u sing-box -n 30 --no-pager 2>/dev/null
-
+        echo
+        echo "sing-box 启动失败。"
+        echo
+        echo "查看日志："
+        echo "journalctl -u sing-box -n 50 --no-pager"
     fi
 
-    echo ""
-    read -r -p "按回车返回..."
+    pause
 }
+
+# ---------------------------------------------------------
+# 配置菜单
+# ---------------------------------------------------------
+
+config_menu() {
+
+    while true; do
+
+        clear_screen
+
+        echo "========================================"
+        echo "          全局代理配置"
+        echo "========================================"
+        echo
+        echo "1. VLESS + WS + TLS"
+        echo "2. SOCKS5"
+        echo "3. VLESS + Reality"
+        echo "0. 返回"
+        echo
+
+        read -r -p "请选择: " TYPE
+
+        clear_screen
+
+        case "$TYPE" in
+
+            1)
+                config_vless
+                ;;
+
+            2)
+                config_socks
+                ;;
+
+            3)
+                config_vless
+                ;;
+
+            0)
+                return
+                ;;
+
+            *)
+                echo "无效选项。"
+                pause
+                ;;
+        esac
+
+    done
+}
+
+# ---------------------------------------------------------
+# 关闭全局代理
+# ---------------------------------------------------------
 
 disable_proxy() {
-    clear
 
-    echo "======================================"
-    echo "           关闭全局代理"
-    echo "======================================"
-    echo ""
+    clear_screen
 
-    stop_proxy
+    echo "========================================"
+    echo "          关闭全局代理"
+    echo "========================================"
+    echo
 
-    echo "全局代理已关闭"
-    echo ""
-    echo "sing-box 服务已停止"
-    echo ""
+    if command -v systemctl >/dev/null 2>&1; then
 
-    read -r -p "按回车返回..."
+        systemctl stop sing-box >/dev/null 2>&1
+        systemctl disable sing-box >/dev/null 2>&1
+
+    fi
+
+    if ip link show "$TUN_NAME" >/dev/null 2>&1; then
+        ip link delete "$TUN_NAME" >/dev/null 2>&1
+    fi
+
+    echo "全局代理已关闭。"
+    echo
+
+    pause
 }
 
-show_status() {
-    clear
+# ---------------------------------------------------------
+# 查看状态
+# ---------------------------------------------------------
 
-    echo "======================================"
-    echo "             当前状态"
-    echo "======================================"
-    echo ""
+show_status() {
+
+    clear_screen
+
+    echo "========================================"
+    echo "            当前状态"
+    echo "========================================"
+    echo
 
     if command -v sing-box >/dev/null 2>&1; then
+
         echo "sing-box：已安装"
-        echo "版本："
-        sing-box version | head -n 1
+        echo
+
+        sing-box version
+
     else
+
         echo "sing-box：未安装"
+
     fi
 
-    echo ""
+    echo
+    echo "----------------------------------------"
+    echo
 
-    if systemctl is-active --quiet sing-box; then
-        echo "代理状态：运行中"
+    if command -v systemctl >/dev/null 2>&1; then
+
+        if systemctl is-active --quiet sing-box; then
+            echo "全局代理：运行中"
+        else
+            echo "全局代理：未运行"
+        fi
+
     else
-        echo "代理状态：未运行"
+
+        echo "系统：没有 systemd"
+
     fi
 
-    echo ""
-
-    if ip link show singtun0 >/dev/null 2>&1; then
-        echo "TUN：singtun0"
-        echo "TUN 状态：存在"
-    else
-        echo "TUN：不存在"
-    fi
-
-    echo ""
+    echo
+    echo "----------------------------------------"
+    echo
 
     if [ -f "$CONFIG" ]; then
         echo "配置文件：存在"
@@ -703,110 +1064,197 @@ show_status() {
         echo "配置文件：不存在"
     fi
 
-    echo ""
+    echo
 
-    if systemctl is-active --quiet sing-box; then
-        echo "最近日志："
-        echo ""
-        journalctl -u sing-box -n 15 --no-pager 2>/dev/null
+    if ip link show "$TUN_NAME" >/dev/null 2>&1; then
+        echo "TUN：运行中"
+    else
+        echo "TUN：未运行"
     fi
 
-    echo ""
-    read -r -p "按回车返回..."
-}
+    echo
 
-install_shortcuts() {
-    cp -f "$0" "$INSTALL_PATH" 2>/dev/null || true
-    chmod +x "$INSTALL_PATH" 2>/dev/null || true
-
-    ln -sf "$INSTALL_PATH" "$OUT_PATH"
-}
-
-initial_install() {
-
-    mkdir -p /etc/sing-box
-    mkdir -p /etc/vps-out
-
-    if ! command -v curl >/dev/null 2>&1 ||
-       ! command -v python3 >/dev/null 2>&1; then
-
-        install_basic || {
-            echo ""
-            echo "基础依赖安装失败"
-            exit 1
-        }
+    if [ -L "$SHORTCUT" ] || [ -x "$SHORTCUT" ]; then
+        echo "快捷命令：out"
+    else
+        echo "快捷命令：未安装"
     fi
 
-    if ! command -v sing-box >/dev/null 2>&1; then
+    echo
+    echo "----------------------------------------"
+    echo
 
-        echo ""
-        echo "未检测到 sing-box"
-        echo "正在自动安装..."
-        echo ""
+    if command -v systemctl >/dev/null 2>&1; then
+        echo "服务状态："
+        systemctl --no-pager --full status sing-box 2>/dev/null | head -n 15
+    fi
 
-        curl -fsSL https://sing-box.app/install.sh | sh
+    echo
 
-        if ! command -v sing-box >/dev/null 2>&1; then
-            echo ""
-            echo "sing-box 自动安装失败"
-            exit 1
+    pause
+}
+
+# ---------------------------------------------------------
+# 查看日志
+# ---------------------------------------------------------
+
+show_logs() {
+
+    clear_screen
+
+    echo "========================================"
+    echo "          sing-box 日志"
+    echo "========================================"
+    echo
+
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u sing-box -n 50 --no-pager
+    else
+        echo "当前系统不支持 journalctl。"
+    fi
+
+    echo
+
+    pause
+}
+
+# ---------------------------------------------------------
+# 完整安装
+# ---------------------------------------------------------
+
+install_all() {
+
+    clear_screen
+
+    echo "========================================"
+    echo "          安装 / 更新"
+    echo "========================================"
+    echo
+
+    install_dependencies || {
+        pause
+        return
+    }
+
+    echo
+    echo "正在安装 / 更新 sing-box..."
+    echo
+
+    if curl -fsSL https://sing-box.app/install.sh | sh; then
+
+        mkdir -p /etc/sing-box
+        mkdir -p /etc/vps-out
+
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1
         fi
 
-        systemctl daemon-reload >/dev/null 2>&1
+        echo
+        echo "sing-box 安装完成。"
+        echo
+
+        sing-box version
+
+        echo
+        echo "正在安装快捷命令..."
+
+        install_shortcut
+
+        echo
+        echo "安装完成。"
+        echo
+        echo "以后可以直接输入："
+        echo
+        echo "out"
+        echo
+        echo "打开管理菜单。"
+
+    else
+
+        echo
+        echo "sing-box 安装失败。"
+
     fi
 
-    install_shortcuts
+    echo
+
+    pause
 }
 
-initial_install
+# ---------------------------------------------------------
+# 主菜单
+# ---------------------------------------------------------
 
-while true
-do
-    clear
+main_menu() {
 
-    echo "======================================"
-    echo "          VPS 全局出口代理"
-    echo "======================================"
-    echo ""
-    echo "1. 配置出口代理"
-    echo "2. 关闭全局代理"
-    echo "3. 查看当前状态"
-    echo "4. 安装 / 更新 sing-box"
-    echo "0. 退出"
-    echo ""
-    echo "快捷命令：out"
-    echo ""
+    while true; do
 
-    read -r -p "请选择: " CHOICE
+        clear_screen
 
-    clear
+        echo "========================================"
+        echo "          VPS 全局代理管理"
+        echo "========================================"
+        echo
+        echo "1. 安装 / 更新 sing-box"
+        echo "2. 配置全局代理"
+        echo "3. 关闭全局代理"
+        echo "4. 查看状态"
+        echo "5. 查看日志"
+        echo "0. 退出"
+        echo
+        echo "----------------------------------------"
+        echo
 
-    case "$CHOICE" in
+        read -r -p "请选择: " CHOICE
 
-        1)
-            configure_proxy
-            ;;
+        clear_screen
 
-        2)
-            disable_proxy
-            ;;
+        case "$CHOICE" in
 
-        3)
-            show_status
-            ;;
+            1)
+                install_all
+                ;;
 
-        4)
-            install_singbox
-            ;;
+            2)
+                config_menu
+                ;;
 
-        0)
-            clear
-            exit 0
-            ;;
+            3)
+                disable_proxy
+                ;;
 
-        *)
-            echo "无效选择"
-            sleep 1
-            ;;
-    esac
-done
+            4)
+                show_status
+                ;;
+
+            5)
+                show_logs
+                ;;
+
+            0)
+                clear_screen
+                exit 0
+                ;;
+
+            *)
+                echo "无效选项。"
+                pause
+                ;;
+
+        esac
+
+    done
+}
+
+# ---------------------------------------------------------
+# 启动
+# ---------------------------------------------------------
+
+check_root
+
+mkdir -p /etc/sing-box
+mkdir -p /etc/vps-out
+
+install_shortcut
+
+main_menu
