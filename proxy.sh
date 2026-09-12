@@ -49,6 +49,40 @@ detect_os() {
     fi
 }
 
+# Alpine 没有 systemd，提供最小兼容层，保持原菜单逻辑不变
+alpine_systemctl_compat() {
+    if [ "$OS" != "alpine" ]; then
+        return 0
+    fi
+
+    systemctl() {
+        local action="${1:-}"
+        shift || true
+        local svc=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --quiet|--no-pager) ;;
+                --*) ;;
+                *) svc="$1" ;;
+            esac
+            shift
+        done
+        [ -n "$svc" ] || svc="sing-box"
+        case "$action" in
+            daemon-reload|reset-failed) return 0 ;;
+            enable) rc-update add "$svc" default >/dev/null 2>&1 || true ;;
+            disable) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
+            start) rc-service "$svc" start ;;
+            stop) rc-service "$svc" stop ;;
+            restart) rc-service "$svc" restart ;;
+            status) rc-service "$svc" status ;;
+            is-active) rc-service "$svc" status >/dev/null 2>&1 ;;
+            *) return 1 ;;
+        esac
+    }
+}
+
+
 # ============================================================
 # 安装依赖
 # ============================================================
@@ -59,8 +93,18 @@ install_dependencies() {
     echo "正在检测系统..."
 
     detect_os
+    alpine_systemctl_compat
 
     case "$OS" in
+
+        alpine)
+
+            apk update
+            apk add --no-cache \
+                bash curl wget ca-certificates python3 \
+                iproute2 procps tar gzip unzip openrc
+
+            ;;
 
         ubuntu|debian)
 
@@ -203,6 +247,31 @@ install_singbox() {
 # ============================================================
 
 install_service() {
+
+    if [ "$OS" = "alpine" ]; then
+        mkdir -p /etc/init.d
+
+        cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box Proxy Service"
+command="$SB_BIN"
+command_args="run -c $CONFIG"
+command_background="yes"
+pidfile="/run/\${RC_SVCNAME}.pid"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.log"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+        chmod +x /etc/init.d/sing-box
+        touch /var/log/sing-box.log
+        rc-update add sing-box default >/dev/null 2>&1 || true
+        return 0
+    fi
 
     mkdir -p /etc/systemd/system
 
@@ -1233,259 +1302,80 @@ def parse_tuic(url):
 # ============================================================
 
 def parse_ss(url):
-
     p = urllib.parse.urlsplit(url)
-
     q = urllib.parse.parse_qs(
         p.query,
         keep_blank_values=True
     )
 
     method = ""
-
     password = ""
-
     server = p.hostname
-
     port = p.port
 
-    # --------------------------------------------------------
-    # SIP002
-    # --------------------------------------------------------
-
+    # SIP002：ss://BASE64(method:password)@server:port
     if p.username:
-
-        raw_user = uq(
-            p.username
-        )
-
-        raw_pass = uq(
-            p.password or ""
-        )
-
-        if ":" in raw_user:
-
-            method, password = \
-                raw_user.split(
-                    ":",
-                    1
-                )
-
+        user = uq(p.username)
+        passwd = uq(p.password or "")
+        decoded_user = decode_b64(user)
+        if ":" in decoded_user:
+            method, password = decoded_user.split(":", 1)
+        elif ":" in user:
+            method, password = user.split(":", 1)
         else:
+            method = user
+            password = passwd
 
-            method = raw_user
-
-            password = raw_pass
-
-
-    # --------------------------------------------------------
-    # 完整 base64
-    # --------------------------------------------------------
-
-    if (
-        (not method or not password)
-        and
-        p.username
-        and
-        not server
-    ):
-
-        decoded = b64decode_any(
-            p.username
-        )
-
-        if ":" in decoded:
-
-            method, password = \
-                decoded.split(
-                    ":",
-                    1
-                )
-
-
-    # --------------------------------------------------------
-    # 旧格式 / 整体 Base64
-    # --------------------------------------------------------
-
-    if (
-        not server
-        and
-        not method
-    ):
-
-        decoded = b64decode_any(
-            url.split(
-                "://",
-                1
-            )[1].split(
-                "#",
-                1
-            )[0]
-        )
-
-        if "@" in decoded:
-
-            userinfo, hostpart = \
-                decoded.rsplit(
-                    "@",
-                    1
-                )
-
-            if ":" in userinfo:
-
-                method, password = \
-                    userinfo.split(
-                        ":",
-                        1
-                    )
-
-            if ":" in hostpart:
-
-                server, port_text = \
-                    hostpart.rsplit(
-                        ":",
-                        1
-                    )
-
+    # 整体 Base64：ss://BASE64(method:password@server:port)
+    if not method or not password or not server or not port:
+        payload = url.split("://", 1)[1].split("#", 1)[0]
+        decoded = decode_b64(payload)
+        if decoded and "@" in decoded:
+            info, host = decoded.rsplit("@", 1)
+            if ":" in info:
+                method, password = info.split(":", 1)
+            if ":" in host:
+                server, port_text = host.rsplit(":", 1)
                 try:
-
-                    port = int(
-                        port_text
-                    )
-
+                    port = int(port_text)
                 except:
-
                     pass
-
-
-    # --------------------------------------------------------
-    # query 参数
-    # --------------------------------------------------------
+            else:
+                server = host
+                port = None
 
     if not method:
-
-        method = uq(
-            qget(
-                q,
-                "method"
-            )
-        )
-
+        method = uq(qget(q, "method"))
     if not password:
-
-        password = uq(
-            qget(
-                q,
-                "password"
-            )
-        )
-
+        password = uq(qget(q, "password"))
     if not server:
-
-        server = uq(
-            qget(
-                q,
-                "server"
-            )
-        )
-
+        server = uq(qget(q, "server"))
     if not port:
-
-        port_text = qget(
-            q,
-            "port"
-        )
-
+        port_text = qget(q, "port")
         if port_text:
-
             try:
-
-                port = int(
-                    port_text
-                )
-
+                port = int(port_text)
             except:
-
                 pass
 
     if not server:
-
-        raise ValueError(
-            "Shadowsocks 缺少服务器地址"
-        )
-
+        raise ValueError("Shadowsocks 缺少服务器")
     if not port:
-
-        raise ValueError(
-            "Shadowsocks 缺少端口"
-        )
-
+        raise ValueError("Shadowsocks 缺少端口")
     if not method:
+        raise ValueError("Shadowsocks 缺少 method")
+    if password == "":
+        raise ValueError("Shadowsocks 缺少 password")
 
-        raise ValueError(
-            "Shadowsocks 缺少加密方式"
-        )
-
-    # Shadowsocks 不要求 URI 中必须存在 user/pass。
-    # 常见情况：ss://method@server:port
-    # 密码可以通过 query 参数提供，也可以为空。
-
-    out = {
-
+    return {
         "type": "shadowsocks",
-
         "tag": "proxy",
-
         "server": server,
-
         "server_port": port,
-
         "method": method,
-
         "password": password,
-
-        "domain_resolver":
-            "dns-bootstrap"
-
+        "domain_resolver": "dns-bootstrap"
     }
-
-    plugin = qget(
-        q,
-        "plugin"
-    )
-
-    plugin_opts = qget(
-        q,
-        "plugin_opts"
-    )
-
-    if plugin:
-
-        out["plugin"] = plugin
-
-    if plugin_opts:
-
-        out["plugin_opts"] = \
-            plugin_opts
-
-    network = qget(
-        q,
-        "network"
-    )
-
-    if network in (
-        "tcp",
-        "udp"
-    ):
-
-        out["network"] = network
-
-    return out, "Shadowsocks / SS2022"
-
-
-# ============================================================
-# 自动识别
-# ============================================================
 
 def parse(url):
 
@@ -1896,10 +1786,14 @@ start_proxy() {
     echo "sing-box 启动失败。"
     echo
 
-    journalctl \
-        -u "$SERVICE" \
-        -n 40 \
-        --no-pager
+    if [ "$OS" = "alpine" ]; then
+        tail -n 40 /var/log/sing-box.log 2>/dev/null || true
+    else
+        journalctl \
+            -u "$SERVICE" \
+            -n 40 \
+            --no-pager
+    fi
 
     return 1
 }
@@ -2220,10 +2114,14 @@ show_log() {
     echo "=========================================="
     echo
 
-    journalctl \
-        -u "$SERVICE" \
-        -n 80 \
-        --no-pager
+    if [ "$OS" = "alpine" ]; then
+        tail -n 80 /var/log/sing-box.log 2>/dev/null || true
+    else
+        journalctl \
+            -u "$SERVICE" \
+            -n 80 \
+            --no-pager
+    fi
 
     echo
 
@@ -2256,6 +2154,40 @@ SB_BIN="$(
     command -v sing-box 2>/dev/null ||
     echo /usr/local/bin/sing-box
 )"
+
+OS="unknown"
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS="${ID:-unknown}"
+fi
+
+if [ "$OS" = "alpine" ]; then
+    systemctl() {
+        local action="${1:-}"
+        shift || true
+        local svc=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --quiet|--no-pager) ;;
+                --*) ;;
+                *) svc="$1" ;;
+            esac
+            shift
+        done
+        [ -n "$svc" ] || svc="sing-box"
+        case "$action" in
+            daemon-reload|reset-failed) return 0 ;;
+            enable) rc-update add "$svc" default >/dev/null 2>&1 || true ;;
+            disable) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
+            start) rc-service "$svc" start ;;
+            stop) rc-service "$svc" stop ;;
+            restart) rc-service "$svc" restart ;;
+            status) rc-service "$svc" status ;;
+            is-active) rc-service "$svc" status >/dev/null 2>&1 ;;
+            *) return 1 ;;
+        esac
+    }
+fi
 
 TMP="/tmp/vps-out-$$"
 
@@ -2976,9 +2908,11 @@ def parse_ss(url):
             "Shadowsocks 缺少 method"
         )
 
-    # Shadowsocks 不要求 URI 中必须存在 user/pass。
-    # 常见情况：ss://method@server:port
-    # 密码可以通过 query 参数提供，也可以为空。
+    if password == "":
+
+        raise ValueError(
+            "Shadowsocks 缺少 password"
+        )
 
     return {
 
@@ -3315,10 +3249,14 @@ start() {
     echo "启动失败。"
     echo
 
-    journalctl \
-        -u "$SERVICE" \
-        -n 30 \
-        --no-pager
+    if [ "$OS" = "alpine" ]; then
+        tail -n 30 /var/log/sing-box.log 2>/dev/null || true
+    else
+        journalctl \
+            -u "$SERVICE" \
+            -n 30 \
+            --no-pager
+    fi
 
     return 1
 }
@@ -3568,10 +3506,14 @@ menu() {
 
             7)
 
-                journalctl \
-                    -u "$SERVICE" \
-                    -n 80 \
-                    --no-pager
+                if [ "$OS" = "alpine" ]; then
+                    tail -n 80 /var/log/sing-box.log 2>/dev/null || true
+                else
+                    journalctl \
+                        -u "$SERVICE" \
+                        -n 80 \
+                        --no-pager
+                fi
 
                 echo
 
@@ -3620,6 +3562,16 @@ install_out_command
 
 clear
 
+CYAN="\033[1;36m"
+BLUE="\033[1;34m"
+WHITE="\033[1;37m"
+RESET="\033[0m"
+
+
+echo -e "${BLUE}"
+echo "                 SingboxLocateTUN"
+echo -e "${WHITE}                 Developer: edmond1294${RESET}"
+echo
 echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
