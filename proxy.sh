@@ -1426,11 +1426,9 @@ def parse_ss(url):
             "Shadowsocks 缺少加密方式"
         )
 
-    if password == "":
-
-        raise ValueError(
-            "Shadowsocks 缺少密码"
-        )
+    # Shadowsocks 不要求 URI 中必须存在 user/pass。
+    # 常见情况：ss://method@server:port
+    # 密码可以通过 query 参数提供，也可以为空。
 
     out = {
 
@@ -2978,11 +2976,9 @@ def parse_ss(url):
             "Shadowsocks 缺少 method"
         )
 
-    if password == "":
-
-        raise ValueError(
-            "Shadowsocks 缺少 password"
-        )
+    # Shadowsocks 不要求 URI 中必须存在 user/pass。
+    # 常见情况：ss://method@server:port
+    # 密码可以通过 query 参数提供，也可以为空。
 
     return {
 
