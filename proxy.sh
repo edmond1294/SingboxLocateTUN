@@ -49,40 +49,6 @@ detect_os() {
     fi
 }
 
-# Alpine 没有 systemd，提供最小兼容层，保持原菜单逻辑不变
-alpine_systemctl_compat() {
-    if [ "$OS" != "alpine" ]; then
-        return 0
-    fi
-
-    systemctl() {
-        local action="${1:-}"
-        shift || true
-        local svc=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --quiet|--no-pager) ;;
-                --*) ;;
-                *) svc="$1" ;;
-            esac
-            shift
-        done
-        [ -n "$svc" ] || svc="sing-box"
-        case "$action" in
-            daemon-reload|reset-failed) return 0 ;;
-            enable) rc-update add "$svc" default >/dev/null 2>&1 || true ;;
-            disable) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
-            start) rc-service "$svc" start ;;
-            stop) rc-service "$svc" stop ;;
-            restart) rc-service "$svc" restart ;;
-            status) rc-service "$svc" status ;;
-            is-active) rc-service "$svc" status >/dev/null 2>&1 ;;
-            *) return 1 ;;
-        esac
-    }
-}
-
-
 # ============================================================
 # 安装依赖
 # ============================================================
@@ -93,18 +59,8 @@ install_dependencies() {
     echo "正在检测系统..."
 
     detect_os
-    alpine_systemctl_compat
 
     case "$OS" in
-
-        alpine)
-
-            apk update
-            apk add --no-cache \
-                bash curl wget ca-certificates python3 \
-                iproute2 procps tar gzip unzip openrc
-
-            ;;
 
         ubuntu|debian)
 
@@ -247,31 +203,6 @@ install_singbox() {
 # ============================================================
 
 install_service() {
-
-    if [ "$OS" = "alpine" ]; then
-        mkdir -p /etc/init.d
-
-        cat > /etc/init.d/sing-box <<EOF
-#!/sbin/openrc-run
-name="sing-box"
-description="sing-box Proxy Service"
-command="$SB_BIN"
-command_args="run -c $CONFIG"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box.log"
-
-depend() {
-    need net
-    after firewall
-}
-EOF
-        chmod +x /etc/init.d/sing-box
-        touch /var/log/sing-box.log
-        rc-update add sing-box default >/dev/null 2>&1 || true
-        return 0
-    fi
 
     mkdir -p /etc/systemd/system
 
@@ -770,10 +701,6 @@ def parse_socks(url):
 
 # ============================================================
 # AnyTLS
-#
-# 常见格式：
-#
-# anytls://password@server:443?sni=example.com
 # ============================================================
 
 def parse_anytls(url):
@@ -898,9 +825,6 @@ def parse_anytls(url):
 
 # ============================================================
 # Hysteria2 / HY2
-#
-# hysteria2://password@server:443?sni=example.com
-# hy2://password@server:443?sni=example.com
 # ============================================================
 
 def parse_hysteria2(url):
@@ -976,10 +900,6 @@ def parse_hysteria2(url):
 
     }
 
-    # --------------------------------------------------------
-    # network
-    # --------------------------------------------------------
-
     network = qget(
         q,
         "network"
@@ -991,11 +911,6 @@ def parse_hysteria2(url):
     ):
 
         out["network"] = network
-
-
-    # --------------------------------------------------------
-    # bandwidth
-    # --------------------------------------------------------
 
     up = qget(
         q,
@@ -1020,11 +935,6 @@ def parse_hysteria2(url):
             out["down_mbps"] = int(down)
         except:
             pass
-
-
-    # --------------------------------------------------------
-    # salamander / gecko
-    # --------------------------------------------------------
 
     obfs = qget(
         q,
@@ -1062,11 +972,6 @@ def parse_hysteria2(url):
                     obfs_password
 
             }
-
-
-    # --------------------------------------------------------
-    # port hopping
-    # --------------------------------------------------------
 
     server_ports = qget(
         q,
@@ -1118,8 +1023,6 @@ def parse_hysteria2(url):
 
 # ============================================================
 # TUIC
-#
-# tuic://uuid:password@server:443?sni=...
 # ============================================================
 
 def parse_tuic(url):
@@ -1294,15 +1197,31 @@ def parse_tuic(url):
 # ============================================================
 # Shadowsocks
 #
+# 支持：
+#
 # ss://BASE64(method:password)@server:port
+#
+# 例如：
+#
+# ss://YWVzLTEyOC1nY206ZGExM2ZmZGYwY2U2MDc0OGIzMTc3MDkyYTllMGQzMzY@39.106.22.253:19997?#SS-aes128-19997
+#
+# 也支持：
+#
+# ss://method:password@server:port
 #
 # 以及：
 #
-# ss://method:password@server:port
+# ss://BASE64(method:password@server:port)
+#
+# 注意：
+# SS 没有 username/password 两个独立字段。
+# 前面的认证信息是 method:password。
 # ============================================================
 
 def parse_ss(url):
+
     p = urllib.parse.urlsplit(url)
+
     q = urllib.parse.parse_qs(
         p.query,
         keep_blank_values=True
@@ -1310,72 +1229,297 @@ def parse_ss(url):
 
     method = ""
     password = ""
+
     server = p.hostname
     port = p.port
 
-    # SIP002：ss://BASE64(method:password)@server:port
-    if p.username:
-        user = uq(p.username)
-        passwd = uq(p.password or "")
-        decoded_user = decode_b64(user)
-        if ":" in decoded_user:
-            method, password = decoded_user.split(":", 1)
-        elif ":" in user:
-            method, password = user.split(":", 1)
-        else:
-            method = user
-            password = passwd
+    # --------------------------------------------------------
+    # SIP002
+    #
+    # ss://BASE64(method:password)@server:port
+    #
+    # 重点：
+    # p.username 这里通常是 BASE64 字符串，
+    # 不能直接当成 method。
+    # --------------------------------------------------------
 
-    # 整体 Base64：ss://BASE64(method:password@server:port)
-    if not method or not password or not server or not port:
-        payload = url.split("://", 1)[1].split("#", 1)[0]
-        decoded = decode_b64(payload)
-        if decoded and "@" in decoded:
-            info, host = decoded.rsplit("@", 1)
-            if ":" in info:
-                method, password = info.split(":", 1)
-            if ":" in host:
-                server, port_text = host.rsplit(":", 1)
-                try:
-                    port = int(port_text)
-                except:
-                    pass
+    if p.username:
+
+        raw_user = uq(
+            p.username
+        )
+
+        raw_pass = uq(
+            p.password or ""
+        )
+
+        # 直接明文 method:password
+        if ":" in raw_user:
+
+            method, password = \
+                raw_user.split(
+                    ":",
+                    1
+                )
+
+        else:
+
+            # 标准 SIP002：
+            # Base64(method:password)
+
+            decoded = b64decode_any(
+                raw_user
+            )
+
+            if ":" in decoded:
+
+                method, password = \
+                    decoded.split(
+                        ":",
+                        1
+                    )
+
             else:
-                server = host
-                port = None
+
+                # 某些客户端可能直接把 method
+                # 放在 username，密码放在 password
+
+                method = raw_user
+
+                password = raw_pass
+
+
+    # --------------------------------------------------------
+    # 如果 URL 中没有 server
+    # 尝试解析完整 Base64
+    #
+    # ss://BASE64(method:password@server:port)
+    # --------------------------------------------------------
+
+    if not server:
+
+        encoded = url.split(
+            "://",
+            1
+        )[1].split(
+            "#",
+            1
+        )[0]
+
+        decoded = b64decode_any(
+            encoded
+        )
+
+        if decoded:
+
+            # 去除可能的 query
+            decoded = decoded.split(
+                "?",
+                1
+            )[0]
+
+            if "@" in decoded:
+
+                userinfo, hostpart = \
+                    decoded.rsplit(
+                        "@",
+                        1
+                    )
+
+                if ":" in userinfo:
+
+                    method, password = \
+                        userinfo.split(
+                            ":",
+                            1
+                        )
+
+                if hostpart.startswith("["):
+
+                    end = hostpart.find("]")
+
+                    if end != -1:
+
+                        server = hostpart[1:end]
+
+                        remain = hostpart[
+                            end + 1:
+                        ]
+
+                        if remain.startswith(":"):
+
+                            port_text = \
+                                remain[1:]
+
+                            try:
+
+                                port = int(
+                                    port_text
+                                )
+
+                            except:
+
+                                pass
+
+                elif ":" in hostpart:
+
+                    server, port_text = \
+                        hostpart.rsplit(
+                            ":",
+                            1
+                        )
+
+                    try:
+
+                        port = int(
+                            port_text
+                        )
+
+                    except:
+
+                        pass
+
+
+    # --------------------------------------------------------
+    # query 参数
+    # --------------------------------------------------------
 
     if not method:
-        method = uq(qget(q, "method"))
+
+        method = uq(
+            qget(
+                q,
+                "method"
+            )
+        )
+
     if not password:
-        password = uq(qget(q, "password"))
+
+        password = uq(
+            qget(
+                q,
+                "password"
+            )
+        )
+
     if not server:
-        server = uq(qget(q, "server"))
+
+        server = uq(
+            qget(
+                q,
+                "server"
+            )
+        )
+
     if not port:
-        port_text = qget(q, "port")
+
+        port_text = qget(
+            q,
+            "port"
+        )
+
         if port_text:
+
             try:
-                port = int(port_text)
+
+                port = int(
+                    port_text
+                )
+
             except:
+
                 pass
 
-    if not server:
-        raise ValueError("Shadowsocks 缺少服务器")
-    if not port:
-        raise ValueError("Shadowsocks 缺少端口")
-    if not method:
-        raise ValueError("Shadowsocks 缺少 method")
-    if password == "":
-        raise ValueError("Shadowsocks 缺少 password")
 
-    return {
+    # --------------------------------------------------------
+    # 最终检查
+    # --------------------------------------------------------
+
+    if not server:
+
+        raise ValueError(
+            "Shadowsocks 缺少服务器地址"
+        )
+
+    if not port:
+
+        raise ValueError(
+            "Shadowsocks 缺少端口"
+        )
+
+    if not method:
+
+        raise ValueError(
+            "Shadowsocks 缺少加密方式"
+        )
+
+    if password == "":
+
+        raise ValueError(
+            "Shadowsocks 缺少密码"
+        )
+
+
+    # --------------------------------------------------------
+    # 生成 sing-box SS outbound
+    # --------------------------------------------------------
+
+    out = {
+
         "type": "shadowsocks",
+
         "tag": "proxy",
+
         "server": server,
+
         "server_port": port,
+
         "method": method,
+
         "password": password,
-        "domain_resolver": "dns-bootstrap"
+
+        "domain_resolver":
+            "dns-bootstrap"
+
     }
+
+    plugin = qget(
+        q,
+        "plugin"
+    )
+
+    plugin_opts = qget(
+        q,
+        "plugin_opts"
+    )
+
+    if plugin:
+
+        out["plugin"] = plugin
+
+    if plugin_opts:
+
+        out["plugin_opts"] = \
+            plugin_opts
+
+    network = qget(
+        q,
+        "network"
+    )
+
+    if network in (
+        "tcp",
+        "udp"
+    ):
+
+        out["network"] = network
+
+    return out, "Shadowsocks / SS2022"
+
+
+# ============================================================
+# 自动识别
+# ============================================================
 
 def parse(url):
 
@@ -1383,20 +1527,11 @@ def parse(url):
 
     lower = url.lower()
 
-    # --------------------------------------------------------
-    # VLESS
-    # --------------------------------------------------------
-
     if lower.startswith(
         "vless://"
     ):
 
         return parse_vless(url)
-
-
-    # --------------------------------------------------------
-    # SOCKS
-    # --------------------------------------------------------
 
     if lower.startswith(
         (
@@ -1408,21 +1543,11 @@ def parse(url):
 
         return parse_socks(url)
 
-
-    # --------------------------------------------------------
-    # AnyTLS
-    # --------------------------------------------------------
-
     if lower.startswith(
         "anytls://"
     ):
 
         return parse_anytls(url)
-
-
-    # --------------------------------------------------------
-    # Hysteria2
-    # --------------------------------------------------------
 
     if lower.startswith(
         (
@@ -1433,32 +1558,17 @@ def parse(url):
 
         return parse_hysteria2(url)
 
-
-    # --------------------------------------------------------
-    # TUIC
-    # --------------------------------------------------------
-
     if lower.startswith(
         "tuic://"
     ):
 
         return parse_tuic(url)
 
-
-    # --------------------------------------------------------
-    # Shadowsocks
-    # --------------------------------------------------------
-
     if lower.startswith(
         "ss://"
     ):
 
         return parse_ss(url)
-
-
-    # --------------------------------------------------------
-    # Base64
-    # --------------------------------------------------------
 
     decoded = decode_b64(url)
 
@@ -1479,7 +1589,6 @@ def parse(url):
             except:
 
                 continue
-
 
     raise ValueError(
         "无法识别链接。"
@@ -1541,7 +1650,6 @@ import json
 import os
 
 parsed_file = sys.argv[1]
-
 config_file = sys.argv[2]
 
 with open(
@@ -1554,19 +1662,10 @@ with open(
 
 outbound = data["outbound"]
 
-# ============================================================
-# 唯一 proxy
-# ============================================================
-
 outbound["tag"] = "proxy"
 
-# sing-box 1.12+
 outbound["domain_resolver"] = \
     "dns-bootstrap"
-
-# ============================================================
-# 完整配置
-# ============================================================
 
 config = {
 
@@ -1577,10 +1676,6 @@ config = {
         "level": "warn"
 
     },
-
-    # ========================================================
-    # DNS
-    # ========================================================
 
     "dns": {
 
@@ -1618,10 +1713,6 @@ config = {
 
     },
 
-    # ========================================================
-    # TUN
-    # ========================================================
-
     "inbounds": [
 
         {
@@ -1650,10 +1741,6 @@ config = {
 
     ],
 
-    # ========================================================
-    # Outbound
-    # ========================================================
-
     "outbounds": [
 
         outbound,
@@ -1675,10 +1762,6 @@ config = {
         }
 
     ],
-
-    # ========================================================
-    # Route
-    # ========================================================
 
     "route": {
 
@@ -1725,7 +1808,6 @@ with open(
 os.replace(
     tmp_file,
     config_file
-
 )
 
 PY
@@ -1786,14 +1868,10 @@ start_proxy() {
     echo "sing-box 启动失败。"
     echo
 
-    if [ "$OS" = "alpine" ]; then
-        tail -n 40 /var/log/sing-box.log 2>/dev/null || true
-    else
-        journalctl \
-            -u "$SERVICE" \
-            -n 40 \
-            --no-pager
-    fi
+    journalctl \
+        -u "$SERVICE" \
+        -n 40 \
+        --no-pager
 
     return 1
 }
@@ -2114,14 +2192,10 @@ show_log() {
     echo "=========================================="
     echo
 
-    if [ "$OS" = "alpine" ]; then
-        tail -n 80 /var/log/sing-box.log 2>/dev/null || true
-    else
-        journalctl \
-            -u "$SERVICE" \
-            -n 80 \
-            --no-pager
-    fi
+    journalctl \
+        -u "$SERVICE" \
+        -n 80 \
+        --no-pager
 
     echo
 
@@ -2154,40 +2228,6 @@ SB_BIN="$(
     command -v sing-box 2>/dev/null ||
     echo /usr/local/bin/sing-box
 )"
-
-OS="unknown"
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS="${ID:-unknown}"
-fi
-
-if [ "$OS" = "alpine" ]; then
-    systemctl() {
-        local action="${1:-}"
-        shift || true
-        local svc=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --quiet|--no-pager) ;;
-                --*) ;;
-                *) svc="$1" ;;
-            esac
-            shift
-        done
-        [ -n "$svc" ] || svc="sing-box"
-        case "$action" in
-            daemon-reload|reset-failed) return 0 ;;
-            enable) rc-update add "$svc" default >/dev/null 2>&1 || true ;;
-            disable) rc-update del "$svc" default >/dev/null 2>&1 || true ;;
-            start) rc-service "$svc" start ;;
-            stop) rc-service "$svc" stop ;;
-            restart) rc-service "$svc" restart ;;
-            status) rc-service "$svc" status ;;
-            is-active) rc-service "$svc" status >/dev/null 2>&1 ;;
-            *) return 1 ;;
-        esac
-    }
-fi
 
 TMP="/tmp/vps-out-$$"
 
@@ -2787,6 +2827,10 @@ def parse_tuic(url):
     return out
 
 
+# ============================================================
+# Shadowsocks
+# ============================================================
+
 def parse_ss(url):
 
     p = urllib.parse.urlsplit(url)
@@ -2799,96 +2843,194 @@ def parse_ss(url):
     method = ""
     password = ""
 
+    server = p.hostname
+    port = p.port
+
+    # --------------------------------------------------------
+    # SIP002
+    #
+    # ss://BASE64(method:password)@server:port
+    # --------------------------------------------------------
+
     if p.username:
 
-        user = uq(
+        raw_user = uq(
             p.username
         )
 
-        passwd = uq(
+        raw_pass = uq(
             p.password or ""
         )
 
-        if ":" in user:
+        # 明文 method:password
+        if ":" in raw_user:
 
             method, password = \
-                user.split(
+                raw_user.split(
                     ":",
                     1
                 )
 
         else:
 
-            method = user
-            password = passwd
+            # 标准 SS：
+            # username 本身是 Base64(method:password)
 
-    if not method:
+            decoded = decode_b64(
+                raw_user
+            )
 
-        decoded = decode_b64(
-            url.split(
-                "://",
-                1
-            )[1].split(
-                "#",
-                1
-            )[0]
-        )
-
-        if "@" in decoded:
-
-            info, host = \
-                decoded.rsplit(
-                    "@",
-                    1
-                )
-
-            if ":" in info:
+            if ":" in decoded:
 
                 method, password = \
-                    info.split(
+                    decoded.split(
                         ":",
                         1
                     )
-
-            if ":" in host:
-
-                server, port = \
-                    host.rsplit(
-                        ":",
-                        1
-                    )
-
-                try:
-                    port = int(port)
-                except:
-                    pass
 
             else:
 
-                server = host
-                port = None
+                method = raw_user
 
-        else:
+                password = raw_pass
 
-            server = p.hostname
-            port = p.port
 
-    else:
+    # --------------------------------------------------------
+    # 整体 Base64
+    #
+    # ss://BASE64(method:password@server:port)
+    # --------------------------------------------------------
 
-        server = p.hostname
-        port = p.port
+    if not server:
+
+        encoded = url.split(
+            "://",
+            1
+        )[1].split(
+            "#",
+            1
+        )[0]
+
+        decoded = decode_b64(
+            encoded
+        )
+
+        if decoded:
+
+            decoded = decoded.split(
+                "?",
+                1
+            )[0]
+
+            if "@" in decoded:
+
+                userinfo, hostpart = \
+                    decoded.rsplit(
+                        "@",
+                        1
+                    )
+
+                if ":" in userinfo:
+
+                    method, password = \
+                        userinfo.split(
+                            ":",
+                            1
+                        )
+
+                if hostpart.startswith("["):
+
+                    end = hostpart.find("]")
+
+                    if end != -1:
+
+                        server = hostpart[1:end]
+
+                        remain = hostpart[
+                            end + 1:
+                        ]
+
+                        if remain.startswith(":"):
+
+                            try:
+
+                                port = int(
+                                    remain[1:]
+                                )
+
+                            except:
+
+                                pass
+
+                elif ":" in hostpart:
+
+                    server, port_text = \
+                        hostpart.rsplit(
+                            ":",
+                            1
+                        )
+
+                    try:
+
+                        port = int(
+                            port_text
+                        )
+
+                    except:
+
+                        pass
+
+
+    # --------------------------------------------------------
+    # query
+    # --------------------------------------------------------
 
     if not method:
 
         method = uq(
-            qget(q, "method")
+            qget(
+                q,
+                "method"
+            )
         )
 
     if not password:
 
         password = uq(
-            qget(q, "password")
+            qget(
+                q,
+                "password"
+            )
         )
+
+    if not server:
+
+        server = uq(
+            qget(
+                q,
+                "server"
+            )
+        )
+
+    if not port:
+
+        port_text = qget(
+            q,
+            "port"
+        )
+
+        if port_text:
+
+            try:
+
+                port = int(
+                    port_text
+                )
+
+            except:
+
+                pass
+
 
     if not server:
 
@@ -2913,6 +3055,7 @@ def parse_ss(url):
         raise ValueError(
             "Shadowsocks 缺少 password"
         )
+
 
     return {
 
@@ -3034,7 +3177,6 @@ import json
 import os
 
 src = sys.argv[1]
-
 dst = sys.argv[2]
 
 with open(
@@ -3249,14 +3391,10 @@ start() {
     echo "启动失败。"
     echo
 
-    if [ "$OS" = "alpine" ]; then
-        tail -n 30 /var/log/sing-box.log 2>/dev/null || true
-    else
-        journalctl \
-            -u "$SERVICE" \
-            -n 30 \
-            --no-pager
-    fi
+    journalctl \
+        -u "$SERVICE" \
+        -n 30 \
+        --no-pager
 
     return 1
 }
@@ -3506,14 +3644,10 @@ menu() {
 
             7)
 
-                if [ "$OS" = "alpine" ]; then
-                    tail -n 80 /var/log/sing-box.log 2>/dev/null || true
-                else
-                    journalctl \
-                        -u "$SERVICE" \
-                        -n 80 \
-                        --no-pager
-                fi
+                journalctl \
+                    -u "$SERVICE" \
+                    -n 80 \
+                    --no-pager
 
                 echo
 
@@ -3562,16 +3696,6 @@ install_out_command
 
 clear
 
-CYAN="\033[1;36m"
-BLUE="\033[1;34m"
-WHITE="\033[1;37m"
-RESET="\033[0m"
-
-
-echo -e "${BLUE}"
-echo "                 SingboxLocateTUN"
-echo -e "${WHITE}                 Developer: edmond1294${RESET}"
-echo
 echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
