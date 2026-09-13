@@ -26,6 +26,42 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================
+# 自动修复模式
+# ============================================================
+repair_service() {
+    echo "正在自动修复 sing-box..."
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG.tmp" >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    if [ -f "$CONFIG" ]; then
+        if ! "$BIN" check -c "$CONFIG" >/dev/null 2>&1; then
+            echo "当前配置检查失败，请重新选择出口生成配置。"
+            return 1
+        fi
+    fi
+    systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+    systemctl restart "$SERVICE"
+    sleep 3
+    if systemctl is-active --quiet "$SERVICE"; then
+        echo "sing-box 修复完成，已正常运行。"
+        return 0
+    fi
+    echo "sing-box 修复失败。"
+    journalctl -u "$SERVICE" -n 30 --no-pager
+    return 1
+}
+
+if [ "${1:-}" = "--repair" ]; then
+    repair_service
+    exit $?
+fi
+
+# ============================================================
 # ROOT
 # ============================================================
 
@@ -205,12 +241,7 @@ install_singbox() {
 install_service() {
 
     mkdir -p /etc/systemd/system
-
-    # 清理旧的 systemd drop-in，避免旧 ExecStart/配置参与启动
     rm -rf /etc/systemd/system/sing-box.service.d
-
-    # 清理可能存在的旧服务定义
-    rm -f /etc/systemd/system/sing-box.service.tmp
 
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
@@ -480,16 +511,14 @@ def parse_vless(url):
 
 
     # --------------------------------------------------------
-    # WS
-    #
-    # 80  默认无 TLS
-    # 443 默认 TLS
-    # security=tls  强制 TLS
-    # security=none 无 TLS
-    # tls=none      强制无 TLS
+    # WS + TLS
     # --------------------------------------------------------
 
-    if transport == "ws":
+    if (
+        transport == "ws"
+        and
+        security == "tls"
+    ):
 
         path = uq(
             qget(
@@ -504,72 +533,61 @@ def parse_vless(url):
             "host"
         )
 
-        tls_value = qget(
-            q,
-            "tls"
-        ).lower()
+        tls = {
 
-        if tls_value in (
-            "none",
-            "false",
-            "0",
-            "off"
-        ):
-            tls_enabled = False
+            "enabled": True,
 
-        elif security == "tls":
-            tls_enabled = True
+            "server_name":
+                sni or ws_host or server,
 
-        elif security in (
-            "none",
-            "false",
-            "0",
-            "off"
-        ):
-            tls_enabled = False
+            "utls": {
 
-        elif port == 443:
-            tls_enabled = True
+                "enabled": True,
 
-        else:
-            tls_enabled = False
+                "fingerprint": fp
+
+            }
+
+        }
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
+
             "server_port": port,
+
             "uuid": uuid,
+
             "domain_resolver":
                 "dns-bootstrap",
+
+            "tls": tls,
+
             "transport": {
+
                 "type": "ws",
+
                 "path": path or "/",
+
                 "headers": {}
+
             }
+
         }
 
         if ws_host:
+
             out["transport"]["headers"]["Host"] = ws_host
 
-        if tls_enabled:
-            out["tls"] = {
-                "enabled": True,
-                "server_name":
-                    sni or ws_host or server,
-                "utls": {
-                    "enabled": True,
-                    "fingerprint": fp
-                }
-            }
-
         if flow:
+
             out["flow"] = flow
 
-        if tls_enabled:
-            return out, "VLESS + WS + TLS"
-
-        return out, "VLESS + WS"
+        return out, "VLESS + WS + TLS"
 
 
     # --------------------------------------------------------
@@ -1645,39 +1663,22 @@ PY
 }
 
 # ============================================================
-# 彻底清理旧 sing-box 状态
-# ============================================================
-
-hard_cleanup() {
-
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-
-    # 删除旧 TUN 接口
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    # 确保 systemd 不再使用旧 drop-in
-    rm -rf /etc/systemd/system/sing-box.service.d
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-}
-
-# ============================================================
 # 生成配置
 # ============================================================
 
 generate_config() {
+    # 切换出口前彻底清理旧 sing-box / TUN / 旧配置
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG" "$CONFIG.tmp" >/dev/null 2>&1 || true
+
 
     PARSED="$1"
 
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
-
-    # 更换出口时彻底清理旧状态
-    hard_cleanup
 
     if [ -f "$CONFIG" ]; then
 
@@ -1685,12 +1686,6 @@ generate_config() {
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
 
     fi
-
-    # 删除旧配置文件，只保留 backup 目录中的历史备份
-    rm -f "$CONFIG" "$CONFIG.tmp"
-
-    # 删除可能残留的 TUN 接口
-    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
@@ -1872,8 +1867,8 @@ start_proxy() {
     echo "正在检查配置..."
     echo
 
-    # 启动前再次彻底清理，防止旧 TUN/旧进程/旧 systemd 配置残留
-    hard_cleanup
+    systemctl stop "$SERVICE" \
+        >/dev/null 2>&1 || true
 
     sleep 1
 
@@ -2507,7 +2502,7 @@ def parse_vless(url):
         return out
 
 
-    if typ == "ws":
+    if typ == "ws" and security == "tls":
 
         path = uq(
             qget(
@@ -2522,64 +2517,59 @@ def parse_vless(url):
             "host"
         )
 
-        tls_value = qget(
-            q,
-            "tls"
-        ).lower()
-
-        if tls_value in (
-            "none",
-            "false",
-            "0",
-            "off"
-        ):
-            tls_enabled = False
-
-        elif security == "tls":
-            tls_enabled = True
-
-        elif security in (
-            "none",
-            "false",
-            "0",
-            "off"
-        ):
-            tls_enabled = False
-
-        elif p.port == 443:
-            tls_enabled = True
-
-        else:
-            tls_enabled = False
-
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": p.hostname,
+
             "server_port": p.port,
+
             "uuid": uuid,
+
             "domain_resolver":
                 "dns-bootstrap",
+
+            "tls": {
+
+                "enabled": True,
+
+                "server_name":
+                    sni or host or p.hostname,
+
+                "utls": {
+
+                    "enabled": True,
+
+                    "fingerprint": fp
+
+                }
+
+            },
+
             "transport": {
+
                 "type": "ws",
-                "path": path or "/",
+
+                "path": path,
+
                 "headers": {}
+
             }
+
         }
 
         if host:
-            out["transport"]["headers"]["Host"] = host
 
-        if tls_enabled:
-            out["tls"] = {
-                "enabled": True,
-                "server_name":
-                    sni or host or p.hostname,
-                "utls": {
-                    "enabled": True,
-                    "fingerprint": fp
-                }
-            }
+            out[
+                "transport"
+            ][
+                "headers"
+            ][
+                "Host"
+            ] = host
 
         flow = qget(
             q,
@@ -3212,19 +3202,17 @@ PY
 # ============================================================
 
 write_config() {
+    # 切换出口前彻底清理旧 sing-box / TUN / 旧配置
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG" "$CONFIG.tmp" >/dev/null 2>&1 || true
+
 
     PARSED="$1"
 
     mkdir -p /etc/sing-box
-
-    # 更换出口时彻底停止旧 sing-box，并清理旧 systemd drop-in/进程/TUN
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    rm -rf /etc/systemd/system/sing-box.service.d
-    ip link delete singtun0 >/dev/null 2>&1 || true
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
     if [ -f "$CONFIG" ]; then
 
@@ -3232,12 +3220,6 @@ write_config() {
             "/etc/sing-box/config.backup.json"
 
     fi
-
-    # 删除旧配置文件，避免旧配置残留
-    rm -f "$CONFIG" "$CONFIG.tmp"
-
-    # 删除可能残留的 TUN 接口
-    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
