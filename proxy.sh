@@ -199,41 +199,6 @@ install_singbox() {
 }
 
 # ============================================================
-# systemd
-# ============================================================
-
-install_service() {
-
-    mkdir -p /etc/systemd/system
-
-    # 清理旧的 systemd drop-in，避免旧 ExecStart/配置参与启动
-    rm -rf /etc/systemd/system/sing-box.service.d
-
-    # 清理可能存在的旧服务定义
-    rm -f /etc/systemd/system/sing-box.service.tmp
-
-    cat > /etc/systemd/system/sing-box.service <<EOF
-[Unit]
-Description=sing-box Proxy Service
-Documentation=https://sing-box.sagernet.org/
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$SB_BIN run -c $CONFIG
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-}
-
-# ============================================================
 # 统一解析器
 # ============================================================
 
@@ -1645,38 +1610,6 @@ PY
 }
 
 # ============================================================
-# 彻底清理旧 sing-box 状态
-# ============================================================
-
-hard_cleanup() {
-
-    # 停止并彻底杀掉旧服务/进程，避免旧实例继续占用状态
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-
-    # 删除旧 TUN 接口
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    # 清理 systemd drop-in / 旧覆盖配置
-    rm -rf /etc/systemd/system/sing-box.service.d
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-}
-
-purge_config_files() {
-
-    # 仅在更换出口、重新生成配置时调用。
-    # 启动现有配置时绝不删除当前 config.json。
-    mkdir -p /etc/sing-box
-    find /etc/sing-box -maxdepth 1 -type f \
-        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
-        -delete 2>/dev/null || true
-}
-
-
-# ============================================================
 # 生成配置
 # ============================================================
 
@@ -1693,12 +1626,18 @@ generate_config() {
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
     fi
 
-    # 停止旧服务并清理旧配置，避免旧 inbound 被再次合并
-    hard_cleanup
-    purge_config_files
+    # 更换出口时自动停止旧服务、清理旧进程、旧 TUN、旧覆盖配置和旧配置文件
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    find /etc/sing-box -maxdepth 1 -type f \
+        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+        -not -name 'config.backup.json' -delete 2>/dev/null || true
     rm -f "$CONFIG.tmp"
-
-    # 删除可能残留的 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
@@ -1881,56 +1820,101 @@ start_proxy() {
     echo "正在检查配置..."
     echo
 
-    # 启动前再次彻底清理，防止旧 TUN/旧进程/旧 systemd 配置残留
-    hard_cleanup
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
 
-    sleep 1
+    mkdir -p /etc/systemd/system
+    cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box Proxy Service
+After=network-online.target
+Wants=network-online.target
 
-    if ! "$SB_BIN" check \
-        -c "$CONFIG"
-    then
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
 
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+
+    if ! "$SB_BIN" check -c "$CONFIG"; then
         echo
         echo "配置检查失败。"
         echo
-
         return 1
     fi
 
-    install_service
-
-    systemctl daemon-reload
-
-    systemctl enable "$SERVICE" \
-        >/dev/null 2>&1
-
-    systemctl reset-failed "$SERVICE" \
-        >/dev/null 2>&1
-
-    systemctl restart "$SERVICE"
-
+    systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+    systemctl start "$SERVICE"
     sleep 3
 
-    if systemctl is-active \
-        --quiet "$SERVICE"
-    then
-
+    if systemctl is-active --quiet "$SERVICE"; then
         echo
         echo "全局出口已开启。"
         echo
+        return 0
+    fi
 
+    if journalctl -u "$SERVICE" -n 40 --no-pager 2>/dev/null | grep -q "duplicate inbound tag"; then
+        echo
+        echo "检测到 duplicate inbound tag，正在自动修复..."
+        echo
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        rm -rf /etc/systemd/system/sing-box.service.d
+        find /etc/sing-box -maxdepth 1 -type f \
+            \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+            -not -name 'config.backup.json' -delete 2>/dev/null || true
+        mkdir -p /etc/systemd/system
+        cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box Proxy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+        if ! "$SB_BIN" check -c "$CONFIG" >/dev/null 2>&1; then
+            echo "自动修复后配置检查失败。"
+            return 1
+        fi
+        systemctl start "$SERVICE"
+        sleep 3
+    fi
+
+    if systemctl is-active --quiet "$SERVICE"; then
+        echo
+        echo "全局出口已开启。"
+        echo
         return 0
     fi
 
     echo
     echo "sing-box 启动失败。"
     echo
-
-    journalctl \
-        -u "$SERVICE" \
-        -n 40 \
-        --no-pager
-
+    journalctl -u "$SERVICE" -n 40 --no-pager
     return 1
 }
 
@@ -3217,33 +3201,7 @@ PY
 }
 
 # ============================================================
-# 彻底清理旧 sing-box 状态
-# ============================================================
-
-hard_cleanup() {
-
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    rm -rf /etc/systemd/system/sing-box.service.d
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-}
-
-purge_config_files() {
-
-    mkdir -p /etc/sing-box
-    find /etc/sing-box -maxdepth 1 -type f \
-        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
-        -delete 2>/dev/null || true
-}
-
-# ============================================================
-# 写入配置
+# 写入配置并自动清理旧状态
 # ============================================================
 
 write_config() {
@@ -3252,23 +3210,26 @@ write_config() {
 
     mkdir -p /etc/sing-box
 
-    # 先备份当前配置，再彻底清理旧状态
     if [ -f "$CONFIG" ]; then
         cp -f "$CONFIG" \
             "/etc/sing-box/config.backup.json"
     fi
 
-    hard_cleanup
-    purge_config_files
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
-    # 确保主目录只生成当前这一份配置
+    find /etc/sing-box -maxdepth 1 -type f \
+        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+        -delete 2>/dev/null || true
+
     rm -f "$CONFIG.tmp"
 
-    # 删除可能残留的 TUN 接口
-    ip link delete singtun0 >/dev/null 2>&1 || true
-
-    python3 - "$PARSED" "$CONFIG" <<'PY'
-
+    python3 - "$PARSED" "$CONFIG" <<'PYCFG'
 import sys
 import json
 import os
@@ -3276,262 +3237,49 @@ import os
 src = sys.argv[1]
 dst = sys.argv[2]
 
-with open(
-    src,
-    encoding="utf-8"
-) as f:
-
+with open(src, encoding="utf-8") as f:
     outbound = json.load(f)
 
 outbound["tag"] = "proxy"
-
-outbound["domain_resolver"] = \
-    "dns-bootstrap"
+outbound["domain_resolver"] = "dns-bootstrap"
 
 config = {
-
-    "log": {
-
-        "disabled": False,
-
-        "level": "warn"
-
-    },
-
+    "log": {"disabled": False, "level": "warn"},
     "dns": {
-
         "servers": [
-
-            {
-
-                "type": "udp",
-
-                "tag": "dns-bootstrap",
-
-                "server": "1.1.1.1",
-
-                "server_port": 53
-
-            },
-
-            {
-
-                "type": "udp",
-
-                "tag": "dns-proxy",
-
-                "server": "1.1.1.1",
-
-                "server_port": 53,
-
-                "detour": "proxy"
-
-            }
-
+            {"type": "udp", "tag": "dns-bootstrap", "server": "1.1.1.1", "server_port": 53},
+            {"type": "udp", "tag": "dns-proxy", "server": "1.1.1.1", "server_port": 53, "detour": "proxy"}
         ],
-
         "final": "dns-proxy"
-
     },
-
-    "inbounds": [
-
-        {
-
-            "type": "tun",
-
-            "tag": "tun-in",
-
-            "interface_name": "singtun0",
-
-            "address": [
-
-                "172.19.0.1/30",
-
-                "fdfe:dcba:9876::1/126"
-
-            ],
-
-            "mtu": 1500,
-
-            "auto_route": True,
-
-            "strict_route": True
-
-        }
-
-    ],
-
+    "inbounds": [{
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": "singtun0",
+        "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+        "mtu": 1500,
+        "auto_route": True,
+        "strict_route": True
+    }],
     "outbounds": [
-
         outbound,
-
-        {
-
-            "type": "direct",
-
-            "tag": "direct"
-
-        },
-
-        {
-
-            "type": "block",
-
-            "tag": "block"
-
-        }
-
+        {"type": "direct", "tag": "direct"},
+        {"type": "block", "tag": "block"}
     ],
-
     "route": {
-
         "auto_detect_interface": True,
-
-        "default_domain_resolver":
-            "dns-bootstrap",
-
-        "rules": [
-
-            {
-
-                "protocol": "dns",
-
-                "action": "hijack-dns"
-
-            }
-
-        ],
-
+        "default_domain_resolver": "dns-bootstrap",
+        "rules": [{"protocol": "dns", "action": "hijack-dns"}],
         "final": "proxy"
-
     }
-
 }
 
 tmp = dst + ".tmp"
-
-with open(
-    tmp,
-    "w",
-    encoding="utf-8"
-) as f:
-
-    json.dump(
-        config,
-        f,
-        ensure_ascii=False,
-        indent=2
-    )
-
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
     f.write("\n")
-
-os.replace(
-    tmp,
-    dst
-)
-
-PY
-}
-
-# ============================================================
-# 强制重建 sing-box systemd 服务
-# ============================================================
-
-install_service() {
-
-    mkdir -p /etc/systemd/system
-
-    # 强制移除旧 drop-in / 覆盖配置
-    rm -rf /etc/systemd/system/sing-box.service.d
-    systemctl revert sing-box >/dev/null 2>&1 || true
-
-    cat > /etc/systemd/system/sing-box.service <<EOT
-[Unit]
-Description=sing-box service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOT
-
-    systemctl daemon-reload
-}
-
-# ============================================================
-# 配置自动修复
-# ============================================================
-
-repair_config() {
-
-    [ -f "$CONFIG" ] || return 1
-
-    python3 - "$CONFIG" <<'PY'
-import json
-import os
-import sys
-
-p=sys.argv[1]
-
-try:
-    with open(p, encoding="utf-8") as f:
-        c=json.load(f)
-except Exception:
-    sys.exit(1)
-
-# 本脚本只需要一个 TUN inbound。
-# 无论旧配置里有什么 Shadowsocks/HTTP/TUN inbound，全部清掉，
-# 防止 sing-box 把旧 inbound 带进 merged config。
-c["inbounds"]=[{
-    "type":"tun",
-    "tag":"tun-in",
-    "interface_name":"singtun0",
-    "address":["172.19.0.1/30","fdfe:dcba:9876::1/126"],
-    "mtu":1500,
-    "auto_route":True,
-    "strict_route":True
-}]
-
-tmp=p+".repair.tmp"
-with open(tmp,"w",encoding="utf-8") as f:
-    json.dump(c,f,ensure_ascii=False,indent=2)
-    f.write("\n")
-os.replace(tmp,p)
-PY
-}
-
-
-# ============================================================
-# 启动前强制校验实际 systemd ExecStart
-# ============================================================
-
-verify_service() {
-
-    install_service
-
-    local actual
-    actual="$(systemctl show sing-box -p ExecStart --value 2>/dev/null || true)"
-
-    case "$actual" in
-        *"/usr/local/bin/sing-box run -c /etc/sing-box/config.json"*)
-            return 0
-            ;;
-    esac
-
-    echo "检测到旧 sing-box 启动参数，正在自动重建..."
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    install_service
+os.replace(tmp, dst)
+PYCFG
 }
 
 # ============================================================
@@ -3546,33 +3294,43 @@ start() {
         return 1
     fi
 
-    # 每次启动都自动清理旧进程、旧 TUN、旧配置、旧 systemd 覆盖
-    hard_cleanup
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
 
-    # 强制只保留当前配置，并且只允许一个 tun-in
-    repair_config
+    mkdir -p /etc/systemd/system
+    cat > /etc/systemd/system/sing-box.service <<EOT
+[Unit]
+Description=sing-box service
+After=network-online.target
+Wants=network-online.target
 
-    # 强制重建 systemd 服务，避免旧 ExecStart / 多配置参数
-    verify_service
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOT
+
+    systemctl daemon-reload
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
     if ! "$SB_BIN" check -c "$CONFIG" >/dev/null 2>&1; then
         echo
-        echo "配置检查失败，正在自动重新清理并修复..."
-        hard_cleanup
-        repair_config
-        verify_service
-
-        if ! "$SB_BIN" check -c "$CONFIG"; then
-            echo
-            echo "自动修复失败。"
-            return 1
-        fi
+        echo "配置检查失败。"
+        "$SB_BIN" check -c "$CONFIG" 2>&1 || true
+        return 1
     fi
 
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
     systemctl enable "$SERVICE" >/dev/null 2>&1 || true
     systemctl start "$SERVICE"
-
     sleep 3
 
     if systemctl is-active --quiet "$SERVICE"; then
@@ -3582,20 +3340,43 @@ start() {
         return 0
     fi
 
-    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag"; then
-        echo "检测到 duplicate inbound tag，正在自动彻底修复..."
-
+    if journalctl -u "$SERVICE" -n 40 --no-pager 2>/dev/null | grep -q "duplicate inbound tag"; then
+        echo
+        echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
+        echo
         systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-        hard_cleanup
-        repair_config
-        verify_service
+        systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        rm -rf /etc/systemd/system/sing-box.service.d
+        find /etc/sing-box -maxdepth 1 -type f \
+            \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+            -not -name 'config.backup.json' -delete 2>/dev/null || true
+        systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+        mkdir -p /etc/systemd/system
+        cat > /etc/systemd/system/sing-box.service <<EOT
+[Unit]
+Description=sing-box service
+After=network-online.target
+Wants=network-online.target
 
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOT
+        systemctl daemon-reload
+        systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
         if ! "$SB_BIN" check -c "$CONFIG" >/dev/null 2>&1; then
-            echo
             echo "自动修复后配置检查仍然失败。"
+            "$SB_BIN" check -c "$CONFIG" 2>&1 || true
             return 1
         fi
-
         systemctl start "$SERVICE"
         sleep 3
     fi
@@ -3613,7 +3394,6 @@ start() {
     journalctl -u "$SERVICE" -n 40 --no-pager
     return 1
 }
-
 
 # ============================================================
 # 菜单
