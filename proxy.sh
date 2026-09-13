@@ -206,6 +206,12 @@ install_service() {
 
     mkdir -p /etc/systemd/system
 
+    # 清理旧的 systemd drop-in，避免旧 ExecStart/配置参与启动
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    # 清理可能存在的旧服务定义
+    rm -f /etc/systemd/system/sing-box.service.tmp
+
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box Proxy Service
@@ -215,9 +221,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/sbin/ip link delete singtun0
 ExecStart=$SB_BIN run -c $CONFIG
-Restart=on-failure
+Restart=always
 RestartSec=3
 LimitNOFILE=1048576
 
@@ -475,14 +480,16 @@ def parse_vless(url):
 
 
     # --------------------------------------------------------
-    # WS + TLS
+    # WS
+    #
+    # 80  默认无 TLS
+    # 443 默认 TLS
+    # security=tls  强制 TLS
+    # security=none 无 TLS
+    # tls=none      强制无 TLS
     # --------------------------------------------------------
 
-    if (
-        transport == "ws"
-        and
-        security == "tls"
-    ):
+    if transport == "ws":
 
         path = uq(
             qget(
@@ -497,61 +504,72 @@ def parse_vless(url):
             "host"
         )
 
-        tls = {
+        tls_value = qget(
+            q,
+            "tls"
+        ).lower()
 
-            "enabled": True,
+        if tls_value in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
 
-            "server_name":
-                sni or ws_host or server,
+        elif security == "tls":
+            tls_enabled = True
 
-            "utls": {
+        elif security in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
 
-                "enabled": True,
+        elif port == 443:
+            tls_enabled = True
 
-                "fingerprint": fp
-
-            }
-
-        }
+        else:
+            tls_enabled = False
 
         out = {
-
             "type": "vless",
-
             "tag": "proxy",
-
             "server": server,
-
             "server_port": port,
-
             "uuid": uuid,
-
             "domain_resolver":
                 "dns-bootstrap",
-
-            "tls": tls,
-
             "transport": {
-
                 "type": "ws",
-
                 "path": path or "/",
-
                 "headers": {}
-
             }
-
         }
 
         if ws_host:
-
             out["transport"]["headers"]["Host"] = ws_host
 
-        if flow:
+        if tls_enabled:
+            out["tls"] = {
+                "enabled": True,
+                "server_name":
+                    sni or ws_host or server,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
 
+        if flow:
             out["flow"] = flow
 
-        return out, "VLESS + WS + TLS"
+        if tls_enabled:
+            return out, "VLESS + WS + TLS"
+
+        return out, "VLESS + WS"
 
 
     # --------------------------------------------------------
@@ -1627,23 +1645,24 @@ PY
 }
 
 # ============================================================
-# 自动修复 sing-box 重复配置
+# 彻底清理旧 sing-box 状态
 # ============================================================
 
-repair_singbox() {
+hard_cleanup() {
+
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+
     pkill -9 -x sing-box >/dev/null 2>&1 || true
-    rm -rf /etc/systemd/system/sing-box.service.d
-    rm -rf /run/systemd/system/sing-box.service.d
-    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/sing-box.service
-    rm -rf /etc/systemd/system/sing-box.service.d
-    rm -rf /run/systemd/system/sing-box.service.d
+
+    # 删除旧 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG.tmp"
+
+    # 确保 systemd 不再使用旧 drop-in
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-    systemctl daemon-reload
 }
 
 # ============================================================
@@ -1654,14 +1673,11 @@ generate_config() {
 
     PARSED="$1"
 
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG.tmp"
-
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
+
+    # 更换出口时彻底清理旧状态
+    hard_cleanup
 
     if [ -f "$CONFIG" ]; then
 
@@ -1669,6 +1685,12 @@ generate_config() {
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
 
     fi
+
+    # 删除旧配置文件，只保留 backup 目录中的历史备份
+    rm -f "$CONFIG" "$CONFIG.tmp"
+
+    # 删除可能残留的 TUN 接口
+    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
@@ -1850,8 +1872,8 @@ start_proxy() {
     echo "正在检查配置..."
     echo
 
-    systemctl stop "$SERVICE" \
-        >/dev/null 2>&1 || true
+    # 启动前再次彻底清理，防止旧 TUN/旧进程/旧 systemd 配置残留
+    hard_cleanup
 
     sleep 1
 
@@ -1876,7 +1898,7 @@ start_proxy() {
     systemctl reset-failed "$SERVICE" \
         >/dev/null 2>&1
 
-    systemctl start "$SERVICE"
+    systemctl restart "$SERVICE"
 
     sleep 3
 
@@ -1889,31 +1911,6 @@ start_proxy() {
         echo
 
         return 0
-    fi
-
-    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
-        echo
-        echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
-        repair_singbox
-        install_service
-        systemctl daemon-reload
-        systemctl enable "$SERVICE" >/dev/null 2>&1
-        systemctl reset-failed "$SERVICE" >/dev/null 2>&1
-
-        if ! "$SB_BIN" check -c "$CONFIG"; then
-            echo "自动修复后配置检查仍然失败。"
-            return 1
-        fi
-
-        systemctl start "$SERVICE"
-        sleep 3
-
-        if systemctl is-active --quiet "$SERVICE"; then
-            echo
-            echo "全局出口已开启。"
-            echo
-            return 0
-        fi
     fi
 
     echo
@@ -2510,7 +2507,7 @@ def parse_vless(url):
         return out
 
 
-    if typ == "ws" and security == "tls":
+    if typ == "ws":
 
         path = uq(
             qget(
@@ -2525,59 +2522,64 @@ def parse_vless(url):
             "host"
         )
 
+        tls_value = qget(
+            q,
+            "tls"
+        ).lower()
+
+        if tls_value in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
+
+        elif security == "tls":
+            tls_enabled = True
+
+        elif security in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
+
+        elif p.port == 443:
+            tls_enabled = True
+
+        else:
+            tls_enabled = False
+
         out = {
-
             "type": "vless",
-
             "tag": "proxy",
-
             "server": p.hostname,
-
             "server_port": p.port,
-
             "uuid": uuid,
-
             "domain_resolver":
                 "dns-bootstrap",
-
-            "tls": {
-
-                "enabled": True,
-
-                "server_name":
-                    sni or host or p.hostname,
-
-                "utls": {
-
-                    "enabled": True,
-
-                    "fingerprint": fp
-
-                }
-
-            },
-
             "transport": {
-
                 "type": "ws",
-
-                "path": path,
-
+                "path": path or "/",
                 "headers": {}
-
             }
-
         }
 
         if host:
+            out["transport"]["headers"]["Host"] = host
 
-            out[
-                "transport"
-            ][
-                "headers"
-            ][
-                "Host"
-            ] = host
+        if tls_enabled:
+            out["tls"] = {
+                "enabled": True,
+                "server_name":
+                    sni or host or p.hostname,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
 
         flow = qget(
             q,
@@ -3206,26 +3208,6 @@ PY
 }
 
 # ============================================================
-# 自动修复 sing-box 重复配置
-# ============================================================
-
-repair_singbox() {
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    rm -rf /etc/systemd/system/sing-box.service.d
-    rm -rf /run/systemd/system/sing-box.service.d
-    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/sing-box.service
-    rm -rf /etc/systemd/system/sing-box.service.d
-    rm -rf /run/systemd/system/sing-box.service.d
-    ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG.tmp"
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-    systemctl daemon-reload
-}
-
-# ============================================================
 # 写入配置
 # ============================================================
 
@@ -3233,13 +3215,16 @@ write_config() {
 
     PARSED="$1"
 
+    mkdir -p /etc/sing-box
+
+    # 更换出口时彻底停止旧 sing-box，并清理旧 systemd drop-in/进程/TUN
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
     pkill -9 -x sing-box >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
     ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG.tmp"
-
-    mkdir -p /etc/sing-box
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
     if [ -f "$CONFIG" ]; then
 
@@ -3247,6 +3232,12 @@ write_config() {
             "/etc/sing-box/config.backup.json"
 
     fi
+
+    # 删除旧配置文件，避免旧配置残留
+    rm -f "$CONFIG" "$CONFIG.tmp"
+
+    # 删除可能残留的 TUN 接口
+    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
@@ -3416,6 +3407,37 @@ PY
 }
 
 # ============================================================
+# 强制重建 sing-box systemd 服务
+# ============================================================
+
+install_service() {
+
+    mkdir -p /etc/systemd/system
+
+    # 清理旧 drop-in，避免旧 ExecStart / 配置参数被叠加
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    cat > /etc/systemd/system/sing-box.service <<EOT
+[Unit]
+Description=sing-box service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOT
+
+    systemctl daemon-reload
+}
+
+# ============================================================
 # 启动
 # ============================================================
 
@@ -3429,6 +3451,12 @@ start() {
         return 1
 
     fi
+
+    # 每次启动前强制清理旧进程、TUN、drop-in 和旧服务定义
+    hard_cleanup
+
+    # 强制写入唯一的 sing-box 服务，确保只读取 config.json
+    install_service
 
     if ! "$SB_BIN" check \
         -c "$CONFIG"
@@ -3463,31 +3491,6 @@ start() {
 
         return 0
 
-    fi
-
-    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
-        echo
-        echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
-        repair_singbox
-        install_service
-        systemctl daemon-reload
-        systemctl enable "$SERVICE" >/dev/null 2>&1
-        systemctl reset-failed "$SERVICE" >/dev/null 2>&1
-
-        if ! "$SB_BIN" check -c "$CONFIG"; then
-            echo "自动修复后配置检查仍然失败。"
-            return 1
-        fi
-
-        systemctl start "$SERVICE"
-        sleep 3
-
-        if systemctl is-active --quiet "$SERVICE"; then
-            echo
-            echo "全局出口已开启。"
-            echo
-            return 0
-        fi
     fi
 
     echo
