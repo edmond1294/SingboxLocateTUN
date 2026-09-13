@@ -474,14 +474,16 @@ def parse_vless(url):
 
 
     # --------------------------------------------------------
-    # WS + TLS
+    # WS
+    #
+    # 80  默认无 TLS
+    # 443 默认 TLS
+    # security=tls  强制 TLS
+    # security=none 无 TLS
+    # tls=none      强制无 TLS
     # --------------------------------------------------------
 
-    if (
-        transport == "ws"
-        and
-        security == "tls"
-    ):
+    if transport == "ws":
 
         path = uq(
             qget(
@@ -496,61 +498,72 @@ def parse_vless(url):
             "host"
         )
 
-        tls = {
+        tls_value = qget(
+            q,
+            "tls"
+        ).lower()
 
-            "enabled": True,
+        if tls_value in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
 
-            "server_name":
-                sni or ws_host or server,
+        elif security == "tls":
+            tls_enabled = True
 
-            "utls": {
+        elif security in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
 
-                "enabled": True,
+        elif port == 443:
+            tls_enabled = True
 
-                "fingerprint": fp
-
-            }
-
-        }
+        else:
+            tls_enabled = False
 
         out = {
-
             "type": "vless",
-
             "tag": "proxy",
-
             "server": server,
-
             "server_port": port,
-
             "uuid": uuid,
-
             "domain_resolver":
                 "dns-bootstrap",
-
-            "tls": tls,
-
             "transport": {
-
                 "type": "ws",
-
                 "path": path or "/",
-
                 "headers": {}
-
             }
-
         }
 
         if ws_host:
-
             out["transport"]["headers"]["Host"] = ws_host
 
-        if flow:
+        if tls_enabled:
+            out["tls"] = {
+                "enabled": True,
+                "server_name":
+                    sni or ws_host or server,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
 
+        if flow:
             out["flow"] = flow
 
-        return out, "VLESS + WS + TLS"
+        if tls_enabled:
+            return out, "VLESS + WS + TLS"
+
+        return out, "VLESS + WS"
 
 
     # --------------------------------------------------------
@@ -2458,7 +2471,7 @@ def parse_vless(url):
         return out
 
 
-    if typ == "ws" and security == "tls":
+    if typ == "ws":
 
         path = uq(
             qget(
@@ -2473,59 +2486,64 @@ def parse_vless(url):
             "host"
         )
 
+        tls_value = qget(
+            q,
+            "tls"
+        ).lower()
+
+        if tls_value in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
+
+        elif security == "tls":
+            tls_enabled = True
+
+        elif security in (
+            "none",
+            "false",
+            "0",
+            "off"
+        ):
+            tls_enabled = False
+
+        elif p.port == 443:
+            tls_enabled = True
+
+        else:
+            tls_enabled = False
+
         out = {
-
             "type": "vless",
-
             "tag": "proxy",
-
             "server": p.hostname,
-
             "server_port": p.port,
-
             "uuid": uuid,
-
             "domain_resolver":
                 "dns-bootstrap",
-
-            "tls": {
-
-                "enabled": True,
-
-                "server_name":
-                    sni or host or p.hostname,
-
-                "utls": {
-
-                    "enabled": True,
-
-                    "fingerprint": fp
-
-                }
-
-            },
-
             "transport": {
-
                 "type": "ws",
-
-                "path": path,
-
+                "path": path or "/",
                 "headers": {}
-
             }
-
         }
 
         if host:
+            out["transport"]["headers"]["Host"] = host
 
-            out[
-                "transport"
-            ][
-                "headers"
-            ][
-                "Host"
-            ] = host
+        if tls_enabled:
+            out["tls"] = {
+                "enabled": True,
+                "server_name":
+                    sni or host or p.hostname,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
 
         flow = qget(
             q,
