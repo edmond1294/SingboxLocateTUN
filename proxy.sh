@@ -3,28 +3,46 @@
 set -u
 
 CONFIG="/etc/sing-box/config.json"
-SB_DIR="/etc/sing-box"
 BACKUP_DIR="/etc/sing-box/backup"
 SERVICE="sing-box"
+BIN="/usr/local/bin/sing-box"
 CMD="/usr/local/bin/out"
 VPS_CMD="/usr/local/bin/vps-out"
-TMP="/tmp/vps-out-$$"
+INIT_SYSTEM="systemd"
+OS="unknown"
+
+# 兼容 Debian/Ubuntu/RHEL/Fedora 与 Alpine/OpenRC；Alpine 无 systemd 时自动使用 OpenRC
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS="${ID:-unknown}"
+    fi
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service >/dev/null 2>&1; then
+        INIT_SYSTEM="openrc"
+    else
+        INIT_SYSTEM="none"
+    fi
+}
+
+detect_os
+
+TMP="/tmp/out_proxy_$$"
 
 mkdir -p "$BACKUP_DIR"
 
-cleanup_tmp() {
+cleanup() {
     rm -f \
         "$TMP" \
         "$TMP.link" \
         "$TMP.json" \
         "$TMP.py" \
         "$TMP.err" \
-        "$TMP.out" \
-        "$TMP.tmp" \
         2>/dev/null || true
 }
 
-trap cleanup_tmp EXIT
+trap cleanup EXIT
 
 # ============================================================
 # ROOT
@@ -41,74 +59,27 @@ fi
 
 detect_os() {
 
-    OS="unknown"
-    VERSION_ID=""
-
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS="${ID:-unknown}"
         VERSION_ID="${VERSION_ID:-}"
+    else
+        OS="unknown"
     fi
-
 }
 
 # ============================================================
-# init 检测
-# ============================================================
-
-detect_init() {
-
-    INIT="none"
-
-    if command -v systemctl >/dev/null 2>&1; then
-        INIT="systemd"
-        return
-    fi
-
-    if command -v rc-service >/dev/null 2>&1; then
-        INIT="openrc"
-        return
-    fi
-
-}
-
-# ============================================================
-# 包管理器
+# 安装依赖
 # ============================================================
 
 install_dependencies() {
 
-    detect_os
-
     echo
     echo "正在检测系统..."
-    echo "系统：$OS"
+
+    detect_os
 
     case "$OS" in
-
-        alpine)
-
-            apk update
-
-            apk add \
-                bash \
-                curl \
-                wget \
-                ca-certificates \
-                python3 \
-                iproute2 \
-                procps \
-                tar \
-                gzip \
-                unzip \
-                jq \
-                openrc \
-                tzdata \
-                coreutils \
-                grep \
-                sed
-
-            ;;
 
         ubuntu|debian)
 
@@ -117,7 +88,6 @@ install_dependencies() {
             apt-get update -y
 
             apt-get install -y \
-                bash \
                 curl \
                 wget \
                 ca-certificates \
@@ -126,11 +96,7 @@ install_dependencies() {
                 procps \
                 tar \
                 gzip \
-                unzip \
-                jq \
-                coreutils \
-                grep \
-                sed
+                unzip
 
             ;;
 
@@ -139,7 +105,6 @@ install_dependencies() {
             if command -v dnf >/dev/null 2>&1; then
 
                 dnf install -y \
-                    bash \
                     curl \
                     wget \
                     ca-certificates \
@@ -148,16 +113,11 @@ install_dependencies() {
                     procps \
                     tar \
                     gzip \
-                    unzip \
-                    jq \
-                    coreutils \
-                    grep \
-                    sed
+                    unzip
 
             else
 
                 yum install -y \
-                    bash \
                     curl \
                     wget \
                     ca-certificates \
@@ -166,11 +126,7 @@ install_dependencies() {
                     procps \
                     tar \
                     gzip \
-                    unzip \
-                    jq \
-                    coreutils \
-                    grep \
-                    sed
+                    unzip
 
             fi
 
@@ -178,33 +134,15 @@ install_dependencies() {
 
         *)
 
-            if command -v apk >/dev/null 2>&1; then
+            echo "未识别系统：$OS"
 
-                apk update
-
-                apk add \
-                    bash \
-                    curl \
-                    wget \
-                    ca-certificates \
-                    python3 \
-                    iproute2 \
-                    procps \
-                    tar \
-                    gzip \
-                    unzip \
-                    jq \
-                    openrc \
-                    coreutils
-
-            elif command -v apt-get >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
 
                 export DEBIAN_FRONTEND=noninteractive
 
                 apt-get update -y
 
                 apt-get install -y \
-                    bash \
                     curl \
                     wget \
                     ca-certificates \
@@ -213,14 +151,11 @@ install_dependencies() {
                     procps \
                     tar \
                     gzip \
-                    unzip \
-                    jq \
-                    coreutils
+                    unzip
 
             else
 
-                echo
-                echo "无法识别系统，也没有可用的包管理器。"
+                echo "无法自动安装依赖。"
                 exit 1
 
             fi
@@ -228,125 +163,6 @@ install_dependencies() {
             ;;
 
     esac
-
-    detect_init
-
-    echo
-    echo "初始化系统：$INIT"
-    echo
-
-}
-
-# ============================================================
-# 停止旧服务
-# ============================================================
-
-stop_existing_service() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        systemctl stop sing-box.service \
-            >/dev/null 2>&1 || true
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        rc-service sing-box stop \
-            >/dev/null 2>&1 || true
-
-    fi
-
-    pkill -x sing-box \
-        >/dev/null 2>&1 || true
-
-}
-
-# ============================================================
-# 清理旧配置
-#
-# 重点：
-# 不再调用 install_service
-# 不再调用 hard_cleanup
-#
-# 彻底解决：
-# duplicate inbound tag: tun-in
-# ============================================================
-
-clean_old_config() {
-
-    echo
-    echo "正在清理旧 sing-box 配置..."
-    echo
-
-    stop_existing_service
-
-    mkdir -p "$BACKUP_DIR"
-
-    # 备份当前主配置
-    if [ -f "$CONFIG" ]; then
-
-        cp -f \
-            "$CONFIG" \
-            "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
-
-    fi
-
-    # 删除旧配置碎片
-    rm -rf \
-        "$SB_DIR/conf" \
-        "$SB_DIR/configs" \
-        "$SB_DIR/config.d" \
-        "$SB_DIR/inbounds" \
-        "$SB_DIR/outbounds" \
-        2>/dev/null || true
-
-    # 删除旧主配置
-    rm -f \
-        "$CONFIG" \
-        "$SB_DIR/config.yaml" \
-        "$SB_DIR/config.yml" \
-        2>/dev/null || true
-
-    # 清理可能遗留的 sing-box 配置文件
-    find "$SB_DIR" \
-        -maxdepth 2 \
-        -type f \
-        \( \
-            -name "*.json" \
-            -o -name "*.yaml" \
-            -o -name "*.yml" \
-        \) \
-        ! -path "$BACKUP_DIR/*" \
-        ! -path "$CONFIG" \
-        -delete \
-        2>/dev/null || true
-
-    mkdir -p "$SB_DIR"
-    mkdir -p "$BACKUP_DIR"
-
-}
-
-# ============================================================
-# 查找 sing-box
-# ============================================================
-
-find_singbox() {
-
-    SB_BIN=""
-
-    if command -v sing-box >/dev/null 2>&1; then
-        SB_BIN="$(command -v sing-box)"
-    fi
-
-    if [ -z "$SB_BIN" ] && [ -x "/usr/local/bin/sing-box" ]; then
-        SB_BIN="/usr/local/bin/sing-box"
-    fi
-
-    if [ -z "$SB_BIN" ] && [ -x "/usr/bin/sing-box" ]; then
-        SB_BIN="/usr/bin/sing-box"
-    fi
-
 }
 
 # ============================================================
@@ -355,59 +171,39 @@ find_singbox() {
 
 install_singbox() {
 
-    find_singbox
+    echo
+    echo "正在检查 sing-box..."
+
+    SB_BIN=""
+
+    if command -v sing-box >/dev/null 2>&1; then
+        SB_BIN="$(command -v sing-box)"
+    elif [ -x "$BIN" ]; then
+        SB_BIN="$BIN"
+    fi
 
     if [ -n "$SB_BIN" ]; then
 
-        echo
         echo "检测到 sing-box："
+
         "$SB_BIN" version 2>/dev/null | head -n 1
-        echo
 
         return 0
-
     fi
 
-    detect_os
-
     echo
-    echo "未检测到 sing-box。"
-    echo "正在安装..."
-    echo
+    echo "未安装 sing-box。"
+    echo "开始自动安装..."
 
-    if [ "$OS" = "alpine" ]; then
+    bash <(curl -fsSL https://sing-box.app/install.sh)
 
-        # Alpine 官方包优先
-        if apk add sing-box >/dev/null 2>&1; then
-
-            find_singbox
-
-        fi
-
+    if command -v sing-box >/dev/null 2>&1; then
+        SB_BIN="$(command -v sing-box)"
+    elif [ -x "$BIN" ]; then
+        SB_BIN="$BIN"
     fi
 
-    # 如果系统包没有可用版本，使用官方安装器
     if [ -z "${SB_BIN:-}" ]; then
-
-        if command -v curl >/dev/null 2>&1; then
-
-            curl -fsSL \
-                https://sing-box.app/install.sh \
-                | bash
-
-        else
-
-            wget -qO- \
-                https://sing-box.app/install.sh \
-                | bash
-
-        fi
-
-    fi
-
-    find_singbox
-
-    if [ -z "$SB_BIN" ]; then
 
         echo
         echo "sing-box 安装失败。"
@@ -417,13 +213,61 @@ install_singbox() {
 
     echo
     echo "sing-box 安装完成："
-    "$SB_BIN" version 2>/dev/null | head -n 1
-    echo
 
+    "$SB_BIN" version 2>/dev/null | head -n 1
 }
 
 # ============================================================
-# TLS 配置
+# systemd
+# ============================================================
+
+install_service() {
+
+    detect_os
+
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        mkdir -p /etc/systemd/system
+
+        cat > /etc/systemd/system/sing-box.service <<VPSOUT_SERVICE_EOF
+[Unit]
+Description=sing-box Proxy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c $CONFIG
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+VPSOUT_SERVICE_EOF
+
+        systemctl daemon-reload
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        mkdir -p /etc/init.d
+        cat > /etc/init.d/sing-box <<VPSOUT_OPENRC_EOF
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box Proxy Service"
+command="$SB_BIN"
+command_args="run -c $CONFIG"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+directory="/etc/sing-box"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+VPSOUT_OPENRC_EOF
+        chmod +x /etc/init.d/sing-box
+        rc-update add sing-box default >/dev/null 2>&1 || true
+    fi
+}
+
+
+# ============================================================
+# 统一解析器
 # ============================================================
 
 parse_link() {
@@ -445,54 +289,53 @@ link = open(
 ).read().strip()
 
 
+# ============================================================
+# Base64
+# ============================================================
+
+def decode_b64(v):
+
+    v = v.strip()
+
+    v += "=" * ((4 - len(v) % 4) % 4)
+
+    try:
+        return base64.urlsafe_b64decode(v).decode()
+    except:
+        return ""
+
+
+def b64decode_any(v):
+
+    v = urllib.parse.unquote(v)
+
+    v += "=" * ((4 - len(v) % 4) % 4)
+
+    try:
+        return base64.urlsafe_b64decode(v).decode()
+    except:
+        try:
+            return base64.b64decode(v).decode()
+        except:
+            return ""
+
+
 def uq(v):
     return urllib.parse.unquote(v or "")
 
 
 def qget(q, name, default=""):
+
     return q.get(name, [default])[0]
 
 
-def decode_b64(v):
-
-    if not v:
-        return ""
-
-    v = urllib.parse.unquote(v.strip())
-    v += "=" * ((4 - len(v) % 4) % 4)
-
-    try:
-        return base64.urlsafe_b64decode(v).decode()
-    except Exception:
-        try:
-            return base64.b64decode(v).decode()
-        except Exception:
-            return ""
-
-
-def bool_value(v):
-
-    return str(v).lower() in (
-        "1",
-        "true",
-        "yes",
-        "on"
-    )
-
+# ============================================================
+# TLS
+# ============================================================
 
 def tls_config(q, server, default_enabled=True):
 
-    security = qget(q, "security").lower()
-
-    if security in (
-        "none",
-        "null",
-        "false",
-        "off"
-    ):
-        return {
-            "enabled": False
-        }
+    enabled = default_enabled
 
     insecure = qget(
         q,
@@ -500,23 +343,29 @@ def tls_config(q, server, default_enabled=True):
         qget(q, "allowInsecure", "0")
     )
 
-    sni = qget(
+    server_name = qget(
         q,
         "sni",
         qget(q, "peer", server)
     )
 
     tls = {
-        "enabled": default_enabled,
-        "server_name": sni
+        "enabled": enabled,
+        "server_name": server_name
     }
 
-    if bool_value(insecure):
+    if str(insecure).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on"
+    ):
         tls["insecure"] = True
 
     alpn = qget(q, "alpn")
 
     if alpn:
+
         tls["alpn"] = [
             x.strip()
             for x in alpn.split(",")
@@ -526,6 +375,7 @@ def tls_config(q, server, default_enabled=True):
     fp = qget(q, "fp")
 
     if fp:
+
         tls["utls"] = {
             "enabled": True,
             "fingerprint": fp
@@ -552,7 +402,9 @@ def parse_vless(url):
         raise ValueError("VLESS 缺少服务器端口")
 
     uuid = uq(p.username)
+
     server = p.hostname
+
     port = p.port
 
     q = urllib.parse.parse_qs(
@@ -585,9 +437,9 @@ def parse_vless(url):
         "flow"
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # Reality
-    # ========================================================
+    # --------------------------------------------------------
 
     if security == "reality":
 
@@ -602,52 +454,73 @@ def parse_vless(url):
         )
 
         if not public_key:
+
             raise ValueError(
                 "Reality 链接缺少 pbk"
             )
 
         tls = {
+
             "enabled": True,
-            "server_name": sni or server,
+
+            "server_name":
+                sni or server,
+
             "utls": {
+
                 "enabled": True,
+
                 "fingerprint": fp
+
             },
+
             "reality": {
+
                 "enabled": True,
+
                 "public_key": public_key,
+
                 "short_id": short_id
+
             }
+
         }
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
+
             "server_port": port,
+
             "uuid": uuid,
-            "domain_resolver": "dns-bootstrap",
+
+            "domain_resolver":
+                "dns-bootstrap",
+
             "tls": tls
+
         }
 
         if flow:
+
             out["flow"] = flow
 
         return out, "VLESS + Reality"
 
-    # ========================================================
-    # WS
-    #
-    # 支持：
-    #
-    # security=tls
-    # security=none
-    # tls=none
-    # tls=0
-    #
-    # ========================================================
 
-    if transport == "ws":
+    # --------------------------------------------------------
+    # WS + TLS
+    # --------------------------------------------------------
+
+    if (
+        transport == "ws"
+        and
+        security == "tls"
+    ):
 
         path = uq(
             qget(
@@ -662,128 +535,149 @@ def parse_vless(url):
             "host"
         )
 
-        tls_disabled = (
-            security in (
-                "",
-                "none",
-                "null",
-                "false",
-                "off"
-            )
-            or
-            qget(q, "tls").lower() in (
-                "none",
-                "false",
-                "0",
-                "off"
-            )
-        )
+        tls = {
 
-        out = {
-            "type": "vless",
-            "tag": "proxy",
-            "server": server,
-            "server_port": port,
-            "uuid": uuid,
-            "domain_resolver": "dns-bootstrap",
-            "transport": {
-                "type": "ws",
-                "path": path or "/",
-                "headers": {}
+            "enabled": True,
+
+            "server_name":
+                sni or ws_host or server,
+
+            "utls": {
+
+                "enabled": True,
+
+                "fingerprint": fp
+
             }
+
         }
 
-        if not tls_disabled:
+        out = {
 
-            out["tls"] = {
-                "enabled": True,
-                "server_name":
-                    sni or ws_host or server,
-                "utls": {
-                    "enabled": True,
-                    "fingerprint": fp
-                }
+            "type": "vless",
+
+            "tag": "proxy",
+
+            "server": server,
+
+            "server_port": port,
+
+            "uuid": uuid,
+
+            "domain_resolver":
+                "dns-bootstrap",
+
+            "tls": tls,
+
+            "transport": {
+
+                "type": "ws",
+
+                "path": path or "/",
+
+                "headers": {}
+
             }
 
-        else:
-
-            out["tls"] = {
-                "enabled": False
-            }
+        }
 
         if ws_host:
 
             out["transport"]["headers"]["Host"] = ws_host
 
         if flow:
-            out["flow"] = flow
 
-        if tls_disabled:
-            return out, "VLESS + WS"
+            out["flow"] = flow
 
         return out, "VLESS + WS + TLS"
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # VLESS TCP + TLS
-    # ========================================================
+    # --------------------------------------------------------
 
     if (
         transport in (
             "",
             "tcp"
         )
-        and security == "tls"
+        and
+        security == "tls"
     ):
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
+
             "server_port": port,
+
             "uuid": uuid,
-            "domain_resolver": "dns-bootstrap",
+
+            "domain_resolver":
+                "dns-bootstrap",
+
             "tls": {
+
                 "enabled": True,
-                "server_name": sni or server,
+
+                "server_name":
+                    sni or server,
+
                 "utls": {
+
                     "enabled": True,
+
                     "fingerprint": fp
+
                 }
+
             }
+
         }
 
         if flow:
+
             out["flow"] = flow
 
         return out, "VLESS + TLS"
 
-    # ========================================================
-    # VLESS TCP 无 TLS
-    # ========================================================
 
-    if (
-        transport in (
-            "",
-            "tcp"
-        )
+    # --------------------------------------------------------
+    # VLESS TCP
+    # --------------------------------------------------------
+
+    if transport in (
+        "",
+        "tcp"
     ):
 
         out = {
+
             "type": "vless",
+
             "tag": "proxy",
+
             "server": server,
+
             "server_port": port,
+
             "uuid": uuid,
-            "domain_resolver": "dns-bootstrap",
-            "tls": {
-                "enabled": False
-            }
+
+            "domain_resolver":
+                "dns-bootstrap"
+
         }
 
         if flow:
+
             out["flow"] = flow
 
         return out, "VLESS + TCP"
+
 
     raise ValueError(
         "不支持的 VLESS 类型"
@@ -799,29 +693,47 @@ def parse_socks(url):
     p = urllib.parse.urlsplit(url)
 
     if not p.hostname:
+
         raise ValueError(
             "SOCKS5 缺少服务器地址"
         )
 
     if not p.port:
+
         raise ValueError(
             "SOCKS5 缺少端口"
         )
 
     out = {
+
         "type": "socks",
+
         "tag": "proxy",
+
         "server": p.hostname,
+
         "server_port": p.port,
+
         "version": "5",
-        "domain_resolver": "dns-bootstrap"
+
+        "domain_resolver":
+            "dns-bootstrap"
+
     }
 
     if p.username:
-        out["username"] = uq(p.username)
+
+        out["username"] = \
+            urllib.parse.unquote(
+                p.username
+            )
 
     if p.password:
-        out["password"] = uq(p.password)
+
+        out["password"] = \
+            urllib.parse.unquote(
+                p.password
+            )
 
     return out, "SOCKS5"
 
@@ -835,13 +747,49 @@ def parse_anytls(url):
     p = urllib.parse.urlsplit(url)
 
     if not p.hostname:
+
         raise ValueError(
             "AnyTLS 缺少服务器地址"
         )
 
     if not p.port:
+
         raise ValueError(
             "AnyTLS 缺少服务器端口"
+        )
+
+    password = ""
+
+    if p.username:
+
+        password = uq(
+            p.username
+        )
+
+    if not password and p.password:
+
+        password = uq(
+            p.password
+        )
+
+    if not password:
+
+        qtmp = urllib.parse.parse_qs(
+            p.query,
+            keep_blank_values=True
+        )
+
+        password = uq(
+            qget(
+                qtmp,
+                "password"
+            )
+        )
+
+    if not password:
+
+        raise ValueError(
+            "AnyTLS 缺少 password"
         )
 
     q = urllib.parse.parse_qs(
@@ -849,47 +797,103 @@ def parse_anytls(url):
         keep_blank_values=True
     )
 
-    password = uq(
-        p.username or
-        qget(q, "password")
-    )
+    out = {
 
-    if not password:
-        raise ValueError(
-            "AnyTLS 缺少 password"
-        )
-
-    return {
         "type": "anytls",
+
         "tag": "proxy",
+
         "server": p.hostname,
+
         "server_port": p.port,
+
         "password": password,
-        "domain_resolver": "dns-bootstrap",
+
+        "domain_resolver":
+            "dns-bootstrap",
+
         "tls": tls_config(
             q,
             p.hostname,
             True
         )
-    }, "AnyTLS"
+
+    }
+
+    idle_check = qget(
+        q,
+        "idle_session_check_interval"
+    )
+
+    idle_timeout = qget(
+        q,
+        "idle_session_timeout"
+    )
+
+    min_idle = qget(
+        q,
+        "min_idle_session"
+    )
+
+    if idle_check:
+
+        out[
+            "idle_session_check_interval"
+        ] = idle_check
+
+    if idle_timeout:
+
+        out[
+            "idle_session_timeout"
+        ] = idle_timeout
+
+    if min_idle:
+
+        try:
+
+            out[
+                "min_idle_session"
+            ] = int(min_idle)
+
+        except:
+
+            pass
+
+    return out, "AnyTLS"
 
 
 # ============================================================
-# Hysteria2
+# Hysteria2 / HY2
 # ============================================================
 
-def parse_hy2(url):
+def parse_hysteria2(url):
 
     p = urllib.parse.urlsplit(url)
 
     if not p.hostname:
+
         raise ValueError(
             "Hysteria2 缺少服务器地址"
         )
 
     if not p.port:
+
         raise ValueError(
             "Hysteria2 缺少服务器端口"
+        )
+
+    password = ""
+
+    if p.username:
+
+        password = uq(
+            p.username
+        )
+
+    if p.password:
+
+        password = uq(
+            p.password
         )
 
     q = urllib.parse.parse_qs(
@@ -897,52 +901,43 @@ def parse_hy2(url):
         keep_blank_values=True
     )
 
-    password = uq(
-        p.username or
-        qget(q, "password")
-    )
+    if not password:
+
+        password = uq(
+            qget(
+                q,
+                "password"
+            )
+        )
 
     if not password:
+
         raise ValueError(
             "Hysteria2 缺少 password"
         )
 
     out = {
+
         "type": "hysteria2",
+
         "tag": "proxy",
+
         "server": p.hostname,
+
         "server_port": p.port,
+
         "password": password,
-        "domain_resolver": "dns-bootstrap",
+
+        "domain_resolver":
+            "dns-bootstrap",
+
         "tls": tls_config(
             q,
             p.hostname,
             True
         )
+
     }
-
-    obfs = qget(
-        q,
-        "obfs"
-    )
-
-    obfs_password = qget(
-        q,
-        "obfs-password",
-        qget(q, "obfs_password")
-    )
-
-    if obfs:
-
-        if not obfs_password:
-            raise ValueError(
-                "Hysteria2 使用 obfs 时缺少 obfs-password"
-            )
-
-        out["obfs"] = {
-            "type": obfs,
-            "password": obfs_password
-        }
 
     network = qget(
         q,
@@ -953,7 +948,114 @@ def parse_hy2(url):
         "tcp",
         "udp"
     ):
+
         out["network"] = network
+
+    up = qget(
+        q,
+        "up_mbps"
+    )
+
+    down = qget(
+        q,
+        "down_mbps"
+    )
+
+    if up:
+
+        try:
+            out["up_mbps"] = int(up)
+        except:
+            pass
+
+    if down:
+
+        try:
+            out["down_mbps"] = int(down)
+        except:
+            pass
+
+    obfs = qget(
+        q,
+        "obfs"
+    )
+
+    obfs_password = qget(
+        q,
+        "obfs-password",
+        qget(
+            q,
+            "obfs_password"
+        )
+    )
+
+    if obfs:
+
+        if obfs.lower() in (
+            "salamander",
+            "gecko"
+        ):
+
+            if not obfs_password:
+
+                raise ValueError(
+                    "Hysteria2 使用 obfs 时缺少 obfs-password"
+                )
+
+            out["obfs"] = {
+
+                "type":
+                    obfs.lower(),
+
+                "password":
+                    obfs_password
+
+            }
+
+    server_ports = qget(
+        q,
+        "server_ports"
+    )
+
+    if server_ports:
+
+        ports = [
+
+            x.strip()
+
+            for x in server_ports.split(",")
+
+            if x.strip()
+
+        ]
+
+        if ports:
+
+            out["server_ports"] = ports
+
+            out.pop(
+                "server_port",
+                None
+            )
+
+    hop_interval = qget(
+        q,
+        "hop_interval"
+    )
+
+    if hop_interval:
+
+        out["hop_interval"] = hop_interval
+
+    hop_interval_max = qget(
+        q,
+        "hop_interval_max"
+    )
+
+    if hop_interval_max:
+
+        out["hop_interval_max"] = \
+            hop_interval_max
 
     return out, "Hysteria2"
 
@@ -967,83 +1069,192 @@ def parse_tuic(url):
     p = urllib.parse.urlsplit(url)
 
     if not p.hostname:
+
         raise ValueError(
             "TUIC 缺少服务器地址"
         )
 
     if not p.port:
+
         raise ValueError(
             "TUIC 缺少服务器端口"
         )
+
+    uuid = uq(
+        p.username or ""
+    )
+
+    password = uq(
+        p.password or ""
+    )
 
     q = urllib.parse.parse_qs(
         p.query,
         keep_blank_values=True
     )
 
-    uuid = uq(
-        p.username or
-        qget(q, "uuid")
-    )
+    if not uuid:
 
-    password = uq(
-        p.password or
-        qget(q, "password")
-    )
+        uuid = uq(
+            qget(
+                q,
+                "uuid"
+            )
+        )
+
+    if not password:
+
+        password = uq(
+            qget(
+                q,
+                "password"
+            )
+        )
 
     if not uuid:
+
         raise ValueError(
             "TUIC 缺少 UUID"
         )
 
     if not password:
+
         raise ValueError(
             "TUIC 缺少 password"
         )
 
     out = {
+
         "type": "tuic",
+
         "tag": "proxy",
+
         "server": p.hostname,
+
         "server_port": p.port,
+
         "uuid": uuid,
+
         "password": password,
-        "domain_resolver": "dns-bootstrap",
+
+        "domain_resolver":
+            "dns-bootstrap",
+
         "tls": tls_config(
             q,
             p.hostname,
             True
         )
+
     }
 
-    cc = qget(
+    congestion = qget(
         q,
         "congestion_control"
     )
 
-    if cc in (
+    if congestion in (
         "cubic",
         "new_reno",
         "bbr"
     ):
-        out["congestion_control"] = cc
 
-    mode = qget(
+        out[
+            "congestion_control"
+        ] = congestion
+
+    udp_mode = qget(
         q,
         "udp_relay_mode"
     )
 
-    if mode in (
+    if udp_mode in (
         "native",
         "quic"
     ):
-        out["udp_relay_mode"] = mode
+
+        out[
+            "udp_relay_mode"
+        ] = udp_mode
+
+    udp_over_stream = qget(
+        q,
+        "udp_over_stream"
+    )
+
+    if udp_over_stream:
+
+        out[
+            "udp_over_stream"
+        ] = udp_over_stream.lower() in (
+            "1",
+            "true",
+            "yes"
+        )
+
+    zero_rtt = qget(
+        q,
+        "zero_rtt_handshake"
+    )
+
+    if zero_rtt:
+
+        out[
+            "zero_rtt_handshake"
+        ] = zero_rtt.lower() in (
+            "1",
+            "true",
+            "yes"
+        )
+
+    heartbeat = qget(
+        q,
+        "heartbeat"
+    )
+
+    if heartbeat:
+
+        out[
+            "heartbeat"
+        ] = heartbeat
+
+    network = qget(
+        q,
+        "network"
+    )
+
+    if network in (
+        "tcp",
+        "udp"
+    ):
+
+        out["network"] = network
 
     return out, "TUIC"
 
 
 # ============================================================
 # Shadowsocks
+#
+# 支持：
+#
+# ss://BASE64(method:password)@server:port
+#
+# 例如：
+#
+# ss://YWVzLTEyOC1nY206ZGExM2ZmZGYwY2U2MDc0OGIzMTc3MDkyYTllMGQzMzY@39.106.22.253:19997?#SS-aes128-19997
+#
+# 也支持：
+#
+# ss://method:password@server:port
+#
+# 以及：
+#
+# ss://BASE64(method:password@server:port)
+#
+# 注意：
+# SS 没有 username/password 两个独立字段。
+# 前面的认证信息是 method:password。
 # ============================================================
 
 def parse_ss(url):
@@ -1061,31 +1272,68 @@ def parse_ss(url):
     server = p.hostname
     port = p.port
 
+    # --------------------------------------------------------
+    # SIP002
+    #
+    # ss://BASE64(method:password)@server:port
+    #
+    # 重点：
+    # p.username 这里通常是 BASE64 字符串，
+    # 不能直接当成 method。
+    # --------------------------------------------------------
+
     if p.username:
 
-        raw_user = uq(p.username)
-        raw_pass = uq(p.password or "")
+        raw_user = uq(
+            p.username
+        )
 
+        raw_pass = uq(
+            p.password or ""
+        )
+
+        # 直接明文 method:password
         if ":" in raw_user:
 
             method, password = \
-                raw_user.split(":", 1)
+                raw_user.split(
+                    ":",
+                    1
+                )
 
         else:
 
-            decoded = decode_b64(
+            # 标准 SIP002：
+            # Base64(method:password)
+
+            decoded = b64decode_any(
                 raw_user
             )
 
             if ":" in decoded:
 
                 method, password = \
-                    decoded.split(":", 1)
+                    decoded.split(
+                        ":",
+                        1
+                    )
 
             else:
 
+                # 某些客户端可能直接把 method
+                # 放在 username，密码放在 password
+
                 method = raw_user
+
                 password = raw_pass
+
+
+    # --------------------------------------------------------
+    # 如果 URL 中没有 server
+    # 尝试解析完整 Base64
+    #
+    # ss://BASE64(method:password@server:port)
+    # --------------------------------------------------------
 
     if not server:
 
@@ -1097,12 +1345,13 @@ def parse_ss(url):
             1
         )[0]
 
-        decoded = decode_b64(
+        decoded = b64decode_any(
             encoded
         )
 
         if decoded:
 
+            # 去除可能的 query
             decoded = decoded.split(
                 "?",
                 1
@@ -1111,12 +1360,18 @@ def parse_ss(url):
             if "@" in decoded:
 
                 userinfo, hostpart = \
-                    decoded.rsplit("@", 1)
+                    decoded.rsplit(
+                        "@",
+                        1
+                    )
 
                 if ":" in userinfo:
 
                     method, password = \
-                        userinfo.split(":", 1)
+                        userinfo.split(
+                            ":",
+                            1
+                        )
 
                 if hostpart.startswith("["):
 
@@ -1126,40 +1381,73 @@ def parse_ss(url):
 
                         server = hostpart[1:end]
 
-                        remain = hostpart[end + 1:]
+                        remain = hostpart[
+                            end + 1:
+                        ]
 
                         if remain.startswith(":"):
 
+                            port_text = \
+                                remain[1:]
+
                             try:
+
                                 port = int(
-                                    remain[1:]
+                                    port_text
                                 )
-                            except Exception:
+
+                            except:
+
                                 pass
 
                 elif ":" in hostpart:
 
                     server, port_text = \
-                        hostpart.rsplit(":", 1)
+                        hostpart.rsplit(
+                            ":",
+                            1
+                        )
 
                     try:
-                        port = int(port_text)
-                    except Exception:
+
+                        port = int(
+                            port_text
+                        )
+
+                    except:
+
                         pass
 
+
+    # --------------------------------------------------------
+    # query 参数
+    # --------------------------------------------------------
+
     if not method:
+
         method = uq(
-            qget(q, "method")
+            qget(
+                q,
+                "method"
+            )
         )
 
     if not password:
+
         password = uq(
-            qget(q, "password")
+            qget(
+                q,
+                "password"
+            )
         )
 
     if not server:
+
         server = uq(
-            qget(q, "server")
+            qget(
+                q,
+                "server"
+            )
         )
 
     if not port:
@@ -1172,39 +1460,100 @@ def parse_ss(url):
         if port_text:
 
             try:
-                port = int(port_text)
-            except Exception:
+
+                port = int(
+                    port_text
+                )
+
+            except:
+
                 pass
 
+
+    # --------------------------------------------------------
+    # 最终检查
+    # --------------------------------------------------------
+
     if not server:
+
         raise ValueError(
-            "Shadowsocks 缺少服务器"
+            "Shadowsocks 缺少服务器地址"
         )
 
     if not port:
+
         raise ValueError(
             "Shadowsocks 缺少端口"
         )
 
     if not method:
+
         raise ValueError(
-            "Shadowsocks 缺少 method"
+            "Shadowsocks 缺少加密方式"
         )
 
     if password == "":
+
         raise ValueError(
-            "Shadowsocks 缺少 password"
+            "Shadowsocks 缺少密码"
         )
 
-    return {
+
+    # --------------------------------------------------------
+    # 生成 sing-box SS outbound
+    # --------------------------------------------------------
+
+    out = {
+
         "type": "shadowsocks",
+
         "tag": "proxy",
+
         "server": server,
+
         "server_port": port,
+
         "method": method,
+
         "password": password,
-        "domain_resolver": "dns-bootstrap"
-    }, "Shadowsocks / SS2022"
+
+        "domain_resolver":
+            "dns-bootstrap"
+
+    }
+
+    plugin = qget(
+        q,
+        "plugin"
+    )
+
+    plugin_opts = qget(
+        q,
+        "plugin_opts"
+    )
+
+    if plugin:
+
+        out["plugin"] = plugin
+
+    if plugin_opts:
+
+        out["plugin_opts"] = \
+            plugin_opts
+
+    network = qget(
+        q,
+        "network"
+    )
+
+    if network in (
+        "tcp",
+        "udp"
+    ):
+
+        out["network"] = network
+
+    return out, "Shadowsocks / SS2022"
 
 
 # ============================================================
@@ -1214,9 +1563,13 @@ def parse_ss(url):
 def parse(url):
 
     url = url.strip()
+
     lower = url.lower()
 
-    if lower.startswith("vless://"):
+    if lower.startswith(
+        "vless://"
+    ):
+
         return parse_vless(url)
 
     if lower.startswith(
@@ -1226,9 +1579,13 @@ def parse(url):
             "socks5h://"
         )
     ):
+
         return parse_socks(url)
 
-    if lower.startswith("anytls://"):
+    if lower.startswith(
+        "anytls://"
+    ):
+
         return parse_anytls(url)
 
     if lower.startswith(
@@ -1237,12 +1594,19 @@ def parse(url):
             "hy2://"
         )
     ):
-        return parse_hy2(url)
 
-    if lower.startswith("tuic://"):
+        return parse_hysteria2(url)
+
+    if lower.startswith(
+        "tuic://"
+    ):
+
         return parse_tuic(url)
 
-    if lower.startswith("ss://"):
+    if lower.startswith(
+        "ss://"
+    ):
+
         return parse_ss(url)
 
     decoded = decode_b64(url)
@@ -1254,15 +1618,21 @@ def parse(url):
             line = line.strip()
 
             if not line:
+
                 continue
 
             try:
+
                 return parse(line)
-            except Exception:
+
+            except:
+
                 continue
 
     raise ValueError(
-        "无法识别链接"
+        "无法识别链接。"
+        "支持 VLESS / SOCKS5 / AnyTLS / "
+        "Hysteria2 / TUIC / Shadowsocks"
     )
 
 
@@ -1286,52 +1656,72 @@ PY
 
         echo
         echo "解析失败："
-        cat "$TMP.err" 2>/dev/null || true
-        return 1
+        cat "$TMP.err"
 
+        return 1
     fi
 
     return 0
 }
 
 # ============================================================
-# 写入唯一配置
+# 生成配置
 # ============================================================
 
-write_config() {
+generate_config() {
 
     PARSED="$1"
 
-    clean_old_config
+    # 清理旧 sing-box 进程、旧 TUN 与旧临时配置，避免重复 tun-in
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG.tmp"
+
+
+    mkdir -p /etc/sing-box
+    mkdir -p "$BACKUP_DIR"
+
+    if [ -f "$CONFIG" ]; then
+
+        cp -f "$CONFIG" \
+            "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
+
+    fi
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
+
 import sys
 import json
 import os
 
-src = sys.argv[1]
-dst = sys.argv[2]
+parsed_file = sys.argv[1]
+config_file = sys.argv[2]
 
 with open(
-    src,
+    parsed_file,
     "r",
     encoding="utf-8"
 ) as f:
+
     data = json.load(f)
 
 outbound = data["outbound"]
 
-# 强制唯一 outbound tag
 outbound["tag"] = "proxy"
 
-outbound["domain_resolver"] = "dns-bootstrap"
-
+outbound["domain_resolver"] = \
+    "dns-bootstrap"
 
 config = {
 
     "log": {
+
         "disabled": False,
+
         "level": "warn"
+
     },
 
     "dns": {
@@ -1339,40 +1729,53 @@ config = {
         "servers": [
 
             {
+
                 "type": "udp",
+
                 "tag": "dns-bootstrap",
+
                 "server": "1.1.1.1",
+
                 "server_port": 53
+
             },
 
             {
+
                 "type": "udp",
+
                 "tag": "dns-proxy",
+
                 "server": "1.1.1.1",
+
                 "server_port": 53,
+
                 "detour": "proxy"
+
             }
 
         ],
 
         "final": "dns-proxy"
-    },
 
-    # ========================================================
-    # 这里只有一个 tun
-    # tag 永远只有一个 tun-in
-    # ========================================================
+    },
 
     "inbounds": [
 
         {
+
             "type": "tun",
+
             "tag": "tun-in",
+
             "interface_name": "singtun0",
 
             "address": [
+
                 "172.19.0.1/30",
+
                 "fdfe:dcba:9876::1/126"
+
             ],
 
             "mtu": 1500,
@@ -1380,6 +1783,7 @@ config = {
             "auto_route": True,
 
             "strict_route": True
+
         }
 
     ],
@@ -1389,13 +1793,19 @@ config = {
         outbound,
 
         {
+
             "type": "direct",
+
             "tag": "direct"
+
         },
 
         {
+
             "type": "block",
+
             "tag": "block"
+
         }
 
     ],
@@ -1404,42 +1814,31 @@ config = {
 
         "auto_detect_interface": True,
 
-        "default_domain_resolver": "dns-bootstrap",
+        "default_domain_resolver":
+            "dns-bootstrap",
 
         "rules": [
 
             {
+
                 "protocol": "dns",
+
                 "action": "hijack-dns"
+
             }
 
         ],
 
         "final": "proxy"
+
     }
+
 }
 
-# ============================================================
-# 再次确保 inbound tag 唯一
-# ============================================================
-
-seen = set()
-
-for inbound in config["inbounds"]:
-
-    tag = inbound.get("tag")
-
-    if tag in seen:
-        raise SystemExit(
-            "检测到重复 inbound tag: " + str(tag)
-        )
-
-    seen.add(tag)
-
-tmp = dst + ".tmp"
+tmp_file = config_file + ".tmp"
 
 with open(
-    tmp,
+    tmp_file,
     "w",
     encoding="utf-8"
 ) as f:
@@ -1454,413 +1853,152 @@ with open(
     f.write("\n")
 
 os.replace(
-    tmp,
-    dst
+    tmp_file,
+    config_file
 )
+
 PY
-
 }
 
 # ============================================================
-# systemd 服务
-# ============================================================
-
-setup_systemd() {
-
-    cat > /etc/systemd/system/sing-box.service <<EOF
-[Unit]
-Description=sing-box VPS Global Proxy
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$SB_BIN run -c $CONFIG
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-
-}
-
-# ============================================================
-# Alpine / OpenRC 服务
-# ============================================================
-
-setup_openrc() {
-
-    mkdir -p /etc/init.d
-
-    cat > /etc/init.d/sing-box <<EOF
-#!/sbin/openrc-run
-
-name="sing-box"
-description="sing-box VPS Global Proxy"
-
-command="$SB_BIN"
-command_args="run -c $CONFIG"
-
-command_background="yes"
-
-pidfile="/run/sing-box.pid"
-
-depend() {
-    need net
-    after firewall
-}
-EOF
-
-    chmod +x /etc/init.d/sing-box
-
-    rc-update del sing-box default \
-        >/dev/null 2>&1 || true
-
-    rc-update add sing-box default \
-        >/dev/null 2>&1 || true
-
-}
-
-# ============================================================
-# 安装服务
-# ============================================================
-
-setup_service() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        setup_systemd
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        setup_openrc
-
-    else
-
-        echo
-        echo "错误：未检测到 systemd 或 OpenRC。"
-        return 1
-
-    fi
-
-    return 0
-}
-
-# ============================================================
-# 服务停止
-# ============================================================
-
-service_stop() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        systemctl stop "$SERVICE" \
-            >/dev/null 2>&1 || true
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        rc-service "$SERVICE" stop \
-            >/dev/null 2>&1 || true
-
-    fi
-
-}
-
-# ============================================================
-# 服务启动
-# ============================================================
-
-service_start() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        systemctl daemon-reload
-
-        systemctl reset-failed "$SERVICE" \
-            >/dev/null 2>&1 || true
-
-        systemctl enable "$SERVICE" \
-            >/dev/null 2>&1 || true
-
-        systemctl restart "$SERVICE"
-
-        sleep 3
-
-        if systemctl is-active \
-            --quiet "$SERVICE"
-        then
-            return 0
-        fi
-
-        return 1
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        rc-service "$SERVICE" restart
-
-        sleep 3
-
-        if rc-service "$SERVICE" status \
-            >/dev/null 2>&1
-        then
-            return 0
-        fi
-
-        return 1
-
-    fi
-
-    return 1
-}
-
-# ============================================================
-# 服务状态
-# ============================================================
-
-service_active() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        systemctl is-active \
-            --quiet "$SERVICE"
-
-        return $?
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        rc-service "$SERVICE" status \
-            >/dev/null 2>&1
-
-        return $?
-
-    fi
-
-    return 1
-}
-
-# ============================================================
-# 日志
-# ============================================================
-
-show_logs() {
-
-    detect_init
-
-    if [ "$INIT" = "systemd" ]; then
-
-        journalctl \
-            -u "$SERVICE" \
-            -n 80 \
-            --no-pager
-
-    elif [ "$INIT" = "openrc" ]; then
-
-        if [ -f /var/log/messages ]; then
-
-            grep "sing-box" \
-                /var/log/messages \
-                | tail -n 80
-
-        elif [ -f /var/log/daemon.log ]; then
-
-            grep "sing-box" \
-                /var/log/daemon.log \
-                | tail -n 80
-
-        else
-
-            echo "Alpine 未找到系统日志文件。"
-
-        fi
-
-    else
-
-        echo "无法读取服务日志。"
-
-    fi
-}
-
-# ============================================================
-# 配置检查
-# ============================================================
-
-check_config() {
-
-    if [ ! -f "$CONFIG" ]; then
-
-        echo
-        echo "配置不存在。"
-        return 1
-
-    fi
-
-    "$SB_BIN" check \
-        -c "$CONFIG"
-
-}
-
-# ============================================================
-# 启动出口
+# 启动
 # ============================================================
 
 start_proxy() {
 
     echo
-    echo "正在清理旧运行状态..."
-    echo
-
-    service_stop
-
-    pkill -x sing-box \
-        >/dev/null 2>&1 || true
-
-    sleep 1
-
-    echo
     echo "正在检查配置..."
     echo
 
-    if ! check_config; then
-
+    if ! "$SB_BIN" check -c "$CONFIG"; then
         echo
         echo "配置检查失败。"
         echo
-
         return 1
-
     fi
 
-    if ! setup_service; then
+    detect_os
 
-        echo
-        echo "服务配置失败。"
-        return 1
-
-    fi
-
-    if ! service_start; then
-
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        rm -rf /etc/systemd/system/sing-box.service.d
+        install_service
+        systemctl daemon-reload
+        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+        systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        systemctl start "$SERVICE"
+        sleep 3
+        if systemctl is-active --quiet "$SERVICE"; then
+            echo
+            echo "全局出口已开启。"
+            echo
+            return 0
+        fi
         echo
         echo "sing-box 启动失败。"
         echo
-
-        show_logs
-
+        journalctl -u "$SERVICE" -n 40 --no-pager
         return 1
-
     fi
 
-    echo
-    echo "全局出口已开启。"
-    echo
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        install_service
+        rc-service "$SERVICE" stop >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        rc-service "$SERVICE" start
+        sleep 3
+        if rc-service "$SERVICE" status >/dev/null 2>&1; then
+            if pgrep -x sing-box >/dev/null 2>&1; then
+                echo
+                echo "全局出口已开启。"
+                echo
+                return 0
+            fi
+        fi
+        echo
+        echo "sing-box 启动失败。"
+        echo
+        [ -f /var/log/sing-box.err ] && tail -n 40 /var/log/sing-box.err || true
+        return 1
+    fi
 
-    return 0
+    echo "未检测到 systemd 或 OpenRC。"
+    return 1
 }
 
+
 # ============================================================
-# 停止出口
+# 停止
 # ============================================================
 
 stop_proxy() {
-
-    service_stop
-
+    detect_os
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service "$SERVICE" stop >/dev/null 2>&1 || true
+    fi
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
     echo
     echo "全局出口已关闭。"
     echo
 }
 
+
 # ============================================================
-# 测试出口
+# 状态
+# ============================================================
+
+status_proxy() {
+    detect_os
+    echo
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        if systemctl is-active --quiet "$SERVICE"; then echo "状态：运行中"; else echo "状态：已停止"; fi
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        if pgrep -x sing-box >/dev/null 2>&1; then echo "状态：运行中"; else echo "状态：已停止"; fi
+    else
+        echo "状态：无法检测"
+    fi
+    echo
+    [ -f "$CONFIG" ] && { echo "当前配置："; echo "$CONFIG"; }
+    echo
+}
+
+
+# ============================================================
+# 测试
 # ============================================================
 
 test_proxy() {
 
     echo
+    echo "正在测试当前出口..."
+    echo
+
     echo "IPv4："
 
-    IPV4=""
+    curl -4 \
+        --connect-timeout 5 \
+        --max-time 15 \
+        -s \
+        https://api.ipify.org
 
-    IPV4="$(
-        curl -4 \
-            -s \
-            --connect-timeout 5 \
-            --max-time 8 \
-            https://api.ipify.org \
-            2>/dev/null || true
-    )"
-
-    if [ -n "$IPV4" ]; then
-        echo "$IPV4"
-    else
-        echo "IPv4 测试失败或超时"
-    fi
+    echo
 
     echo
     echo "IPv6："
 
-    IPV6=""
-
-    IPV6="$(
-        curl -6 \
-            -s \
-            --connect-timeout 5 \
-            --max-time 8 \
-            https://api64.ipify.org \
-            2>/dev/null || true
-    )"
-
-    if [ -n "$IPV6" ]; then
-        echo "$IPV6"
-    else
-        echo "IPv6 不可用或超时"
-    fi
-
-    echo
-}
-
-# ============================================================
-# 查看状态
-# ============================================================
-
-status_proxy() {
-
-    echo
-
-    if service_active; then
-        echo "状态：运行中"
-    else
-        echo "状态：已停止"
-    fi
-
-    echo
-
-    echo "初始化系统：$INIT"
-
-    echo
-
-    if [ -f "$CONFIG" ]; then
-
-        echo "当前配置："
-        echo "$CONFIG"
-
-    else
-
-        echo "暂无配置。"
-
-    fi
+    curl -6 \
+        --connect-timeout 5 \
+        --max-time 15 \
+        -s \
+        https://api64.ipify.org \
+        2>/dev/null || true
 
     echo
 }
@@ -1874,72 +2012,71 @@ select_proxy() {
     clear
 
     echo "=========================================="
-    echo "             选择出口类型"
+    echo "           VPS 全局出口管理"
     echo "=========================================="
     echo
-
+    echo "请选择出口类型："
+    echo
     echo "# 1. VLESS + WS + TLS"
-    echo "# 2. VLESS + WS / 无 TLS"
-    echo "# 3. VLESS + Reality"
-    echo "# 4. SOCKS5"
-    echo "# 5. AnyTLS"
-    echo "# 6. Hysteria2 / HY2"
-    echo "# 7. TUIC"
-    echo "# 8. Shadowsocks / SS2022"
-
+    echo "# 2. VLESS + Reality"
+    echo "# 3. SOCKS5"
+    echo "# 4. AnyTLS"
+    echo "# 5. Hysteria2 / HY2"
+    echo "# 6. TUIC"
+    echo "# 7. Shadowsocks / SS2022"
     echo
 
     read -r \
-        -p "请选择 [1-8]：" \
+        -p "请选择 [1-7]：" \
         TYPE
 
     case "$TYPE" in
 
         1)
-            EXPECT="VLESS + WS + TLS"
+            EXPECTED="VLESS + WS + TLS"
             ;;
 
         2)
-            EXPECT="VLESS + WS"
+            EXPECTED="VLESS + Reality"
             ;;
 
         3)
-            EXPECT="VLESS + Reality"
+            EXPECTED="SOCKS5"
             ;;
 
         4)
-            EXPECT="SOCKS5"
+            EXPECTED="AnyTLS"
             ;;
 
         5)
-            EXPECT="AnyTLS"
+            EXPECTED="Hysteria2"
             ;;
 
         6)
-            EXPECT="Hysteria2"
+            EXPECTED="TUIC"
             ;;
 
         7)
-            EXPECT="TUIC"
-            ;;
-
-        8)
-            EXPECT="Shadowsocks / SS2022"
+            EXPECTED="Shadowsocks / SS2022"
             ;;
 
         *)
+
             echo
             echo "无效选择。"
+
             sleep 1
+
             return
+
             ;;
 
     esac
 
     echo
-    echo "你选择：$EXPECT"
+    echo "你选择：$EXPECTED"
     echo
-    echo "直接粘贴完整链接："
+    echo "请直接粘贴完整连接："
     echo
 
     read -r \
@@ -1950,10 +2087,10 @@ select_proxy() {
 
         echo
         echo "连接不能为空。"
+
         sleep 1
 
         return
-
     fi
 
     echo
@@ -1963,8 +2100,8 @@ select_proxy() {
     if ! parse_link "$LINK"; then
 
         sleep 2
-        return
 
+        return
     fi
 
     PARSED_NAME="$(
@@ -1977,52 +2114,60 @@ with open(
     "r",
     encoding="utf-8"
 ) as f:
+
     print(
         json.load(f)["name"]
     )
 PY
-    )"
+)"
 
-    echo
-    echo "解析成功。"
-    echo "类型：$PARSED_NAME"
-    echo
-
-    # 不再强制要求菜单类型完全一致
-    # 避免 security=none / tls=none 被误判
-
-    echo "正在生成新配置..."
-    echo
-
-    if ! write_config "$TMP.json"; then
+    if [ "$PARSED_NAME" != "$EXPECTED" ]; then
 
         echo
-        echo "配置生成失败。"
+        echo "链接类型与选择不一致。"
+        echo
+        echo "选择：$EXPECTED"
+        echo "解析：$PARSED_NAME"
         echo
 
         read -r \
-            -p "按 Enter 返回菜单..." _
+            -p "是否仍然使用此出口？[y/N]：" \
+            ANSWER
 
-        return 1
+        case "$ANSWER" in
 
+            y|Y)
+                ;;
+
+            *)
+
+                echo "已取消。"
+
+                sleep 1
+
+                return
+
+                ;;
+
+        esac
     fi
 
+    generate_config "$TMP.json"
+
     echo
-    echo "旧配置已清理。"
-    echo "新配置已生成。"
+    echo "配置已生成。"
     echo
 
     if ! start_proxy; then
 
         echo
-        echo "启动失败。"
+        echo "启动失败，请查看上方日志。"
         echo
 
         read -r \
             -p "按 Enter 返回菜单..." _
 
-        return 1
-
+        return
     fi
 
     echo
@@ -2033,7 +2178,6 @@ PY
 
     read -r \
         -p "按 Enter 返回菜单..." _
-
 }
 
 # ============================================================
@@ -2043,6 +2187,7 @@ PY
 quick_install() {
 
     install_dependencies
+
     install_singbox
 
     echo
@@ -2083,7 +2228,7 @@ show_config() {
 }
 
 # ============================================================
-# 查看日志
+# 日志
 # ============================================================
 
 show_log() {
@@ -2095,13 +2240,1267 @@ show_log() {
     echo "=========================================="
     echo
 
-    show_logs
+    journalctl \
+        -u "$SERVICE" \
+        -n 80 \
+        --no-pager
 
     echo
 
     read -r \
         -p "按 Enter 返回菜单..." _
 }
+
+# ============================================================
+# 安装 out 命令
+# ============================================================
+
+install_out_command() {
+
+    cat > "$CMD" <<'EOF'
+#!/usr/bin/env bash
+
+exec /usr/local/bin/vps-out
+EOF
+
+    chmod +x "$CMD"
+    ln -sf "$CMD" /usr/bin/out 2>/dev/null || true
+    ln -sf "$CMD" /bin/out 2>/dev/null || true
+
+    cat > "$VPS_CMD" <<'EOF'
+#!/usr/bin/env bash
+
+CONFIG="/etc/sing-box/config.json"
+
+SERVICE="sing-box"
+
+SB_BIN="$(
+    command -v sing-box 2>/dev/null ||
+    echo /usr/local/bin/sing-box
+)"
+
+INIT_SYSTEM="systemd"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    INIT_SYSTEM="systemd"
+elif command -v rc-service >/dev/null 2>&1; then
+    INIT_SYSTEM="openrc"
+else
+    INIT_SYSTEM="none"
+fi
+
+TMP="/tmp/vps-out-$$"
+
+cleanup() {
+
+    rm -f "$TMP"* \
+        2>/dev/null || true
+
+}
+
+trap cleanup EXIT
+
+# ============================================================
+# 解析链接
+# ============================================================
+
+parse_link() {
+
+    LINK="$1"
+
+    printf '%s' "$LINK" \
+        > "$TMP.link"
+
+    cat > "$TMP.py" <<'PY'
+import sys
+import json
+import urllib.parse
+import base64
+
+link = open(
+    sys.argv[1],
+    "r",
+    encoding="utf-8"
+).read().strip()
+
+
+def uq(v):
+    return urllib.parse.unquote(v or "")
+
+
+def decode_b64(v):
+
+    v = v.strip()
+
+    v += "=" * ((4 - len(v) % 4) % 4)
+
+    try:
+        return base64.urlsafe_b64decode(v).decode()
+    except:
+        try:
+            return base64.b64decode(v).decode()
+        except:
+            return ""
+
+
+def qget(q, name, default=""):
+    return q.get(name, [default])[0]
+
+
+def tls(q, server):
+
+    sni = qget(
+        q,
+        "sni",
+        qget(
+            q,
+            "peer",
+            server
+        )
+    )
+
+    insecure = qget(
+        q,
+        "insecure",
+        qget(
+            q,
+            "allowInsecure",
+            "0"
+        )
+    )
+
+    out = {
+
+        "enabled": True,
+
+        "server_name": sni
+
+    }
+
+    if str(insecure).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on"
+    ):
+
+        out["insecure"] = True
+
+    fp = qget(
+        q,
+        "fp"
+    )
+
+    if fp:
+
+        out["utls"] = {
+
+            "enabled": True,
+
+            "fingerprint": fp
+
+        }
+
+    return out
+
+
+def parse_vless(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    if not p.username:
+        raise ValueError("VLESS 缺少 UUID")
+
+    if not p.hostname:
+        raise ValueError("VLESS 缺少服务器")
+
+    if not p.port:
+        raise ValueError("VLESS 缺少端口")
+
+    q = urllib.parse.parse_qs(
+        p.query,
+        keep_blank_values=True
+    )
+
+    security = qget(
+        q,
+        "security"
+    ).lower()
+
+    typ = qget(
+        q,
+        "type"
+    ).lower()
+
+    sni = qget(
+        q,
+        "sni"
+    )
+
+    fp = qget(
+        q,
+        "fp"
+    ) or "chrome"
+
+    uuid = uq(
+        p.username
+    )
+
+    if security == "reality":
+
+        pbk = qget(
+            q,
+            "pbk"
+        )
+
+        sid = qget(
+            q,
+            "sid"
+        )
+
+        if not pbk:
+            raise ValueError(
+                "Reality 缺少 pbk"
+            )
+
+        out = {
+
+            "type": "vless",
+
+            "tag": "proxy",
+
+            "server": p.hostname,
+
+            "server_port": p.port,
+
+            "uuid": uuid,
+
+            "domain_resolver":
+                "dns-bootstrap",
+
+            "tls": {
+
+                "enabled": True,
+
+                "server_name":
+                    sni or p.hostname,
+
+                "utls": {
+
+                    "enabled": True,
+
+                    "fingerprint": fp
+
+                },
+
+                "reality": {
+
+                    "enabled": True,
+
+                    "public_key": pbk,
+
+                    "short_id": sid
+
+                }
+
+            }
+
+        }
+
+        flow = qget(
+            q,
+            "flow"
+        )
+
+        if flow:
+            out["flow"] = flow
+
+        return out
+
+
+    if typ == "ws" and security in ("tls", "none", ""):
+        path = uq(qget(q, "path", "/"))
+        host = qget(q, "host")
+        out = {
+            "type": "vless",
+            "tag": "proxy",
+            "server": p.hostname,
+            "server_port": p.port,
+            "uuid": uuid,
+            "domain_resolver": "dns-bootstrap",
+            "transport": {
+                "type": "ws",
+                "path": path or "/",
+                "headers": {}
+            }
+        }
+        if host:
+            out["transport"]["headers"]["Host"] = host
+        if security == "tls":
+            out["tls"] = {
+                "enabled": True,
+                "server_name": sni or host or p.hostname,
+                "utls": {"enabled": True, "fingerprint": fp}
+            }
+        flow = qget(q, "flow")
+        if flow:
+            out["flow"] = flow
+        return out
+
+    if typ == "ws" and security == "tls":
+
+        path = uq(
+            qget(
+                q,
+                "path",
+                "/"
+            )
+        )
+
+        host = qget(
+            q,
+            "host"
+        )
+
+        out = {
+
+            "type": "vless",
+
+            "tag": "proxy",
+
+            "server": p.hostname,
+
+            "server_port": p.port,
+
+            "uuid": uuid,
+
+            "domain_resolver":
+                "dns-bootstrap",
+
+            "tls": {
+
+                "enabled": True,
+
+                "server_name":
+                    sni or host or p.hostname,
+
+                "utls": {
+
+                    "enabled": True,
+
+                    "fingerprint": fp
+
+                }
+
+            },
+
+            "transport": {
+
+                "type": "ws",
+
+                "path": path,
+
+                "headers": {}
+
+            }
+
+        }
+
+        if host:
+
+            out[
+                "transport"
+            ][
+                "headers"
+            ][
+                "Host"
+            ] = host
+
+        flow = qget(
+            q,
+            "flow"
+        )
+
+        if flow:
+            out["flow"] = flow
+
+        return out
+
+
+    raise ValueError(
+        "不支持的 VLESS 类型"
+    )
+
+
+def parse_socks(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    if not p.hostname:
+        raise ValueError(
+            "SOCKS5 缺少服务器"
+        )
+
+    if not p.port:
+        raise ValueError(
+            "SOCKS5 缺少端口"
+        )
+
+    out = {
+
+        "type": "socks",
+
+        "tag": "proxy",
+
+        "server": p.hostname,
+
+        "server_port": p.port,
+
+        "version": "5",
+
+        "domain_resolver":
+            "dns-bootstrap"
+
+    }
+
+    if p.username:
+
+        out["username"] = \
+            uq(p.username)
+
+    if p.password:
+
+        out["password"] = \
+            uq(p.password)
+
+    return out
+
+
+def parse_anytls(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    if not p.hostname:
+        raise ValueError(
+            "AnyTLS 缺少服务器"
+        )
+
+    if not p.port:
+        raise ValueError(
+            "AnyTLS 缺少端口"
+        )
+
+    q = urllib.parse.parse_qs(
+        p.query,
+        keep_blank_values=True
+    )
+
+    password = uq(
+        p.username or
+        qget(q, "password")
+    )
+
+    if not password:
+        raise ValueError(
+            "AnyTLS 缺少 password"
+        )
+
+    return {
+
+        "type": "anytls",
+
+        "tag": "proxy",
+
+        "server": p.hostname,
+
+        "server_port": p.port,
+
+        "password": password,
+
+        "domain_resolver":
+            "dns-bootstrap",
+
+        "tls": tls(
+            q,
+            p.hostname
+        )
+
+    }
+
+
+def parse_hy2(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    if not p.hostname:
+        raise ValueError(
+            "Hysteria2 缺少服务器"
+        )
+
+    if not p.port:
+        raise ValueError(
+            "Hysteria2 缺少端口"
+        )
+
+    q = urllib.parse.parse_qs(
+        p.query,
+        keep_blank_values=True
+    )
+
+    password = uq(
+        p.username or
+        qget(q, "password")
+    )
+
+    if not password:
+        raise ValueError(
+            "Hysteria2 缺少 password"
+        )
+
+    out = {
+
+        "type": "hysteria2",
+
+        "tag": "proxy",
+
+        "server": p.hostname,
+
+        "server_port": p.port,
+
+        "password": password,
+
+        "domain_resolver":
+            "dns-bootstrap",
+
+        "tls": tls(
+            q,
+            p.hostname
+        )
+
+    }
+
+    obfs = qget(
+        q,
+        "obfs"
+    )
+
+    obfs_password = qget(
+        q,
+        "obfs-password"
+    )
+
+    if obfs:
+
+        if not obfs_password:
+
+            raise ValueError(
+                "Hysteria2 缺少 obfs-password"
+            )
+
+        out["obfs"] = {
+
+            "type": obfs,
+
+            "password":
+                obfs_password
+
+        }
+
+    network = qget(
+        q,
+        "network"
+    )
+
+    if network in (
+        "tcp",
+        "udp"
+    ):
+
+        out["network"] = network
+
+    return out
+
+
+def parse_tuic(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    if not p.hostname:
+        raise ValueError(
+            "TUIC 缺少服务器"
+        )
+
+    if not p.port:
+        raise ValueError(
+            "TUIC 缺少端口"
+        )
+
+    q = urllib.parse.parse_qs(
+        p.query,
+        keep_blank_values=True
+    )
+
+    uuid = uq(
+        p.username or
+        qget(q, "uuid")
+    )
+
+    password = uq(
+        p.password or
+        qget(q, "password")
+    )
+
+    if not uuid:
+        raise ValueError(
+            "TUIC 缺少 UUID"
+        )
+
+    if not password:
+        raise ValueError(
+            "TUIC 缺少 password"
+        )
+
+    out = {
+
+        "type": "tuic",
+
+        "tag": "proxy",
+
+        "server": p.hostname,
+
+        "server_port": p.port,
+
+        "uuid": uuid,
+
+        "password": password,
+
+        "domain_resolver":
+            "dns-bootstrap",
+
+        "tls": tls(
+            q,
+            p.hostname
+        )
+
+    }
+
+    cc = qget(
+        q,
+        "congestion_control"
+    )
+
+    if cc in (
+        "cubic",
+        "new_reno",
+        "bbr"
+    ):
+
+        out[
+            "congestion_control"
+        ] = cc
+
+    mode = qget(
+        q,
+        "udp_relay_mode"
+    )
+
+    if mode in (
+        "native",
+        "quic"
+    ):
+
+        out[
+            "udp_relay_mode"
+        ] = mode
+
+    return out
+
+
+# ============================================================
+# Shadowsocks
+# ============================================================
+
+def parse_ss(url):
+
+    p = urllib.parse.urlsplit(url)
+
+    q = urllib.parse.parse_qs(
+        p.query,
+        keep_blank_values=True
+    )
+
+    method = ""
+    password = ""
+
+    server = p.hostname
+    port = p.port
+
+    # --------------------------------------------------------
+    # SIP002
+    #
+    # ss://BASE64(method:password)@server:port
+    # --------------------------------------------------------
+
+    if p.username:
+
+        raw_user = uq(
+            p.username
+        )
+
+        raw_pass = uq(
+            p.password or ""
+        )
+
+        # 明文 method:password
+        if ":" in raw_user:
+
+            method, password = \
+                raw_user.split(
+                    ":",
+                    1
+                )
+
+        else:
+
+            # 标准 SS：
+            # username 本身是 Base64(method:password)
+
+            decoded = decode_b64(
+                raw_user
+            )
+
+            if ":" in decoded:
+
+                method, password = \
+                    decoded.split(
+                        ":",
+                        1
+                    )
+
+            else:
+
+                method = raw_user
+
+                password = raw_pass
+
+
+    # --------------------------------------------------------
+    # 整体 Base64
+    #
+    # ss://BASE64(method:password@server:port)
+    # --------------------------------------------------------
+
+    if not server:
+
+        encoded = url.split(
+            "://",
+            1
+        )[1].split(
+            "#",
+            1
+        )[0]
+
+        decoded = decode_b64(
+            encoded
+        )
+
+        if decoded:
+
+            decoded = decoded.split(
+                "?",
+                1
+            )[0]
+
+            if "@" in decoded:
+
+                userinfo, hostpart = \
+                    decoded.rsplit(
+                        "@",
+                        1
+                    )
+
+                if ":" in userinfo:
+
+                    method, password = \
+                        userinfo.split(
+                            ":",
+                            1
+                        )
+
+                if hostpart.startswith("["):
+
+                    end = hostpart.find("]")
+
+                    if end != -1:
+
+                        server = hostpart[1:end]
+
+                        remain = hostpart[
+                            end + 1:
+                        ]
+
+                        if remain.startswith(":"):
+
+                            try:
+
+                                port = int(
+                                    remain[1:]
+                                )
+
+                            except:
+
+                                pass
+
+                elif ":" in hostpart:
+
+                    server, port_text = \
+                        hostpart.rsplit(
+                            ":",
+                            1
+                        )
+
+                    try:
+
+                        port = int(
+                            port_text
+                        )
+
+                    except:
+
+                        pass
+
+
+    # --------------------------------------------------------
+    # query
+    # --------------------------------------------------------
+
+    if not method:
+
+        method = uq(
+            qget(
+                q,
+                "method"
+            )
+        )
+
+    if not password:
+
+        password = uq(
+            qget(
+                q,
+                "password"
+            )
+        )
+
+    if not server:
+
+        server = uq(
+            qget(
+                q,
+                "server"
+            )
+        )
+
+    if not port:
+
+        port_text = qget(
+            q,
+            "port"
+        )
+
+        if port_text:
+
+            try:
+
+                port = int(
+                    port_text
+                )
+
+            except:
+
+                pass
+
+
+    if not server:
+
+        raise ValueError(
+            "Shadowsocks 缺少服务器"
+        )
+
+    if not port:
+
+        raise ValueError(
+            "Shadowsocks 缺少端口"
+        )
+
+    if not method:
+
+        raise ValueError(
+            "Shadowsocks 缺少 method"
+        )
+
+    if password == "":
+
+        raise ValueError(
+            "Shadowsocks 缺少 password"
+        )
+
+
+    return {
+
+        "type": "shadowsocks",
+
+        "tag": "proxy",
+
+        "server": server,
+
+        "server_port": port,
+
+        "method": method,
+
+        "password": password,
+
+        "domain_resolver":
+            "dns-bootstrap"
+
+    }
+
+
+def parse(url):
+
+    lower = url.lower()
+
+    if lower.startswith(
+        "vless://"
+    ):
+        return parse_vless(url)
+
+    if lower.startswith(
+        (
+            "socks://",
+            "socks5://",
+            "socks5h://"
+        )
+    ):
+        return parse_socks(url)
+
+    if lower.startswith(
+        "anytls://"
+    ):
+        return parse_anytls(url)
+
+    if lower.startswith(
+        (
+            "hysteria2://",
+            "hy2://"
+        )
+    ):
+        return parse_hy2(url)
+
+    if lower.startswith(
+        "tuic://"
+    ):
+        return parse_tuic(url)
+
+    if lower.startswith(
+        "ss://"
+    ):
+        return parse_ss(url)
+
+    decoded = decode_b64(url)
+
+    if decoded:
+
+        for line in decoded.splitlines():
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                return parse(line)
+            except:
+                continue
+
+    raise ValueError(
+        "无法识别链接"
+    )
+
+
+print(
+    json.dumps(
+        parse(link),
+        ensure_ascii=False,
+        indent=2
+    )
+)
+PY
+
+    python3 "$TMP.py" "$TMP.link" \
+        > "$TMP.out" \
+        2> "$TMP.err"
+}
+
+# ============================================================
+# 写入配置
+# ============================================================
+
+write_config() {
+
+    PARSED="$1"
+
+    # 切换出口前彻底清理旧 sing-box / TUN，避免 duplicate inbound tag: tun-in
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    ip link delete singtun0 >/dev/null 2>&1 || true
+
+    mkdir -p /etc/sing-box
+
+    if [ -f "$CONFIG" ]; then
+
+        cp "$CONFIG" \
+            "/etc/sing-box/config.backup.json"
+
+    fi
+
+    python3 - "$PARSED" "$CONFIG" <<'PY'
+
+import sys
+import json
+import os
+
+src = sys.argv[1]
+dst = sys.argv[2]
+
+with open(
+    src,
+    encoding="utf-8"
+) as f:
+
+    outbound = json.load(f)
+
+outbound["tag"] = "proxy"
+
+outbound["domain_resolver"] = \
+    "dns-bootstrap"
+
+config = {
+
+    "log": {
+
+        "disabled": False,
+
+        "level": "warn"
+
+    },
+
+    "dns": {
+
+        "servers": [
+
+            {
+
+                "type": "udp",
+
+                "tag": "dns-bootstrap",
+
+                "server": "1.1.1.1",
+
+                "server_port": 53
+
+            },
+
+            {
+
+                "type": "udp",
+
+                "tag": "dns-proxy",
+
+                "server": "1.1.1.1",
+
+                "server_port": 53,
+
+                "detour": "proxy"
+
+            }
+
+        ],
+
+        "final": "dns-proxy"
+
+    },
+
+    "inbounds": [
+
+        {
+
+            "type": "tun",
+
+            "tag": "tun-in",
+
+            "interface_name": "singtun0",
+
+            "address": [
+
+                "172.19.0.1/30",
+
+                "fdfe:dcba:9876::1/126"
+
+            ],
+
+            "mtu": 1500,
+
+            "auto_route": True,
+
+            "strict_route": True
+
+        }
+
+    ],
+
+    "outbounds": [
+
+        outbound,
+
+        {
+
+            "type": "direct",
+
+            "tag": "direct"
+
+        },
+
+        {
+
+            "type": "block",
+
+            "tag": "block"
+
+        }
+
+    ],
+
+    "route": {
+
+        "auto_detect_interface": True,
+
+        "default_domain_resolver":
+            "dns-bootstrap",
+
+        "rules": [
+
+            {
+
+                "protocol": "dns",
+
+                "action": "hijack-dns"
+
+            }
+
+        ],
+
+        "final": "proxy"
+
+    }
+
+}
+
+tmp = dst + ".tmp"
+
+with open(
+    tmp,
+    "w",
+    encoding="utf-8"
+) as f:
+
+    json.dump(
+        config,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    f.write("\n")
+
+os.replace(
+    tmp,
+    dst
+)
+
+PY
+}
+
+# ============================================================
+# 启动
+# ============================================================
+
+start() {
+    if [ ! -f "$CONFIG" ]; then
+        echo
+        echo "暂无出口配置。"
+        return 1
+    fi
+    if ! "$SB_BIN" check -c "$CONFIG"; then
+        echo
+        echo "配置检查失败。"
+        return 1
+    fi
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        rm -rf /etc/systemd/system/sing-box.service.d
+        mkdir -p /etc/systemd/system
+        cat > /etc/systemd/system/sing-box.service <<VPSOUT_SERVICE_EOF
+[Unit]
+Description=sing-box service
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c $CONFIG
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+VPSOUT_SERVICE_EOF
+        systemctl daemon-reload
+        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        systemctl start "$SERVICE"
+        sleep 3
+        if systemctl is-active --quiet "$SERVICE"; then echo; echo "全局出口已开启。"; echo; return 0; fi
+        echo; echo "启动失败。"; journalctl -u "$SERVICE" -n 30 --no-pager; return 1
+    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+        mkdir -p /etc/init.d
+        cat > /etc/init.d/sing-box <<VPSOUT_OPENRC_EOF
+#!/sbin/openrc-run
+name="sing-box"
+description="sing-box Proxy Service"
+command="$SB_BIN"
+command_args="run -c $CONFIG"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+directory="/etc/sing-box"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+VPSOUT_OPENRC_EOF
+        chmod +x /etc/init.d/sing-box
+        rc-update add sing-box default >/dev/null 2>&1 || true
+        rc-service "$SERVICE" stop >/dev/null 2>&1 || true
+        pkill -9 -x sing-box >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+        rc-service "$SERVICE" start
+        sleep 3
+        if pgrep -x sing-box >/dev/null 2>&1; then echo; echo "全局出口已开启。"; echo; return 0; fi
+        echo; echo "启动失败。"; [ -f /var/log/sing-box.err ] && tail -n 30 /var/log/sing-box.err || true; return 1
+    fi
+    echo "未检测到 systemd 或 OpenRC。"
+    return 1
+}
+
 
 # ============================================================
 # 菜单
@@ -2113,8 +3512,6 @@ menu() {
 
         clear
 
-        detect_init
-
         echo "=========================================="
         echo "              VPS 出口管理"
         echo "=========================================="
@@ -2122,14 +3519,15 @@ menu() {
 
         echo "当前状态："
 
-        if service_active; then
-            echo "运行中"
+        if [ "$INIT_SYSTEM" = "systemd" ]; then
+            if systemctl is-active --quiet "$SERVICE"; then echo "运行中"; else echo "已停止"; fi
+        elif [ "$INIT_SYSTEM" = "openrc" ]; then
+            if pgrep -x sing-box >/dev/null 2>&1; then echo "运行中"; else echo "已停止"; fi
         else
             echo "已停止"
         fi
 
         echo
-
         echo "# 1. 更换出口"
         echo "# 2. 开启全局出口"
         echo "# 3. 关闭全局出口"
@@ -2138,7 +3536,6 @@ menu() {
         echo "# 6. 查看配置"
         echo "# 7. 查看日志"
         echo "# 8. 退出"
-
         echo
 
         read -r \
@@ -2149,22 +3546,118 @@ menu() {
 
             1)
 
-                select_proxy
+                echo
+                echo "=========================================="
+                echo "             选择出口类型"
+                echo "=========================================="
+                echo
+                echo "# 1. VLESS + WS + TLS"
+                echo "# 2. VLESS + Reality"
+                echo "# 3. SOCKS5"
+                echo "# 4. AnyTLS"
+                echo "# 5. Hysteria2 / HY2"
+                echo "# 6. TUIC"
+                echo "# 7. Shadowsocks / SS2022"
+                echo
+
+                read -r \
+                    -p "请选择 [1-7]：" \
+                    TYPE
+
+                case "$TYPE" in
+
+                    1)
+                        EXPECT="VLESS + WS + TLS"
+                        ;;
+
+                    2)
+                        EXPECT="VLESS + Reality"
+                        ;;
+
+                    3)
+                        EXPECT="SOCKS5"
+                        ;;
+
+                    4)
+                        EXPECT="AnyTLS"
+                        ;;
+
+                    5)
+                        EXPECT="Hysteria2"
+                        ;;
+
+                    6)
+                        EXPECT="TUIC"
+                        ;;
+
+                    7)
+                        EXPECT="Shadowsocks / SS2022"
+                        ;;
+
+                    *)
+
+                        echo "无效选择。"
+
+                        sleep 1
+
+                        continue
+
+                        ;;
+
+                esac
+
+                echo
+                echo "请选择：$EXPECT"
+                echo
+                echo "直接粘贴完整链接："
+                echo
+
+                read -r \
+                    -p "> " \
+                    LINK
+
+                if [ -z "$LINK" ]; then
+
+                    echo "不能为空。"
+
+                    sleep 1
+
+                    continue
+
+                fi
+
+                if ! parse_link "$LINK"; then
+
+                    echo
+                    echo "解析失败："
+
+                    cat "$TMP.err" \
+                        2>/dev/null || true
+
+                    sleep 2
+
+                    continue
+
+                fi
+
+                write_config "$TMP.out"
+
+                echo
+                echo "解析成功。"
+                echo
+                echo "正在启动..."
+                echo
+
+                start
+
+                read -r \
+                    -p "按 Enter 返回菜单..." _
 
                 ;;
 
             2)
 
-                clear
-
-                echo "=========================================="
-                echo "             开启全局出口"
-                echo "=========================================="
-                echo
-
-                start_proxy
-
-                echo
+                start
 
                 read -r \
                     -p "按 Enter 返回菜单..." _
@@ -2173,14 +3666,13 @@ menu() {
 
             3)
 
-                clear
+                if [ "$INIT_SYSTEM" = "systemd" ]; then systemctl stop "$SERVICE" >/dev/null 2>&1 || true; elif [ "$INIT_SYSTEM" = "openrc" ]; then rc-service "$SERVICE" stop >/dev/null 2>&1 || true; fi
+                pkill -9 -x sing-box >/dev/null 2>&1 || true
+                ip link delete singtun0 >/dev/null 2>&1 || true
 
-                echo "=========================================="
-                echo "             关闭全局出口"
-                echo "=========================================="
                 echo
-
-                stop_proxy
+                echo "全局出口已关闭。"
+                echo
 
                 read -r \
                     -p "按 Enter 返回菜单..." _
@@ -2189,13 +3681,13 @@ menu() {
 
             4)
 
-                clear
+                echo
 
-                echo "=========================================="
-                echo "                 状态"
-                echo "=========================================="
+                systemctl status \
+                    "$SERVICE" \
+                    --no-pager
 
-                status_proxy
+                echo
 
                 read -r \
                     -p "按 Enter 返回菜单..." _
@@ -2204,13 +3696,26 @@ menu() {
 
             5)
 
-                clear
+                echo
+                echo "IPv4："
 
-                echo "=========================================="
-                echo "                测试出口"
-                echo "=========================================="
+                curl -4 \
+                    --connect-timeout 5 \
+                    --max-time 15 \
+                    https://api.ipify.org
 
-                test_proxy
+                echo
+                echo
+                echo "IPv6："
+
+                curl -6 \
+                    --connect-timeout 5 \
+                    --max-time 15 \
+                    https://api64.ipify.org \
+                    2>/dev/null || true
+
+                echo
+                echo
 
                 read -r \
                     -p "按 Enter 返回菜单..." _
@@ -2219,27 +3724,51 @@ menu() {
 
             6)
 
-                show_config
+                echo
+
+                if [ -f "$CONFIG" ]; then
+
+                    cat "$CONFIG"
+
+                else
+
+                    echo "暂无配置。"
+
+                fi
+
+                echo
+
+                read -r \
+                    -p "按 Enter 返回菜单..." _
 
                 ;;
 
             7)
 
-                show_log
+                journalctl \
+                    -u "$SERVICE" \
+                    -n 80 \
+                    --no-pager
+
+                echo
+
+                read -r \
+                    -p "按 Enter 返回菜单..." _
 
                 ;;
 
             8)
 
                 clear
+
                 exit 0
 
                 ;;
 
             *)
 
-                echo
                 echo "无效选择。"
+
                 sleep 1
 
                 ;;
@@ -2249,108 +3778,22 @@ menu() {
     done
 }
 
-# ============================================================
-# 安装 out 快捷命令
-# ============================================================
+menu
 
-install_out_command() {
-
-    cat > "$VPS_CMD" <<'VPS_EOF'
-#!/usr/bin/env bash
-
-exec /usr/local/bin/vps-out-main
-VPS_EOF
-
-    chmod +x "$VPS_CMD"
-
-    cat > /usr/local/bin/vps-out-main <<'MAIN_EOF'
-#!/usr/bin/env bash
-
-# ============================================================
-# 这里重新加载主脚本
-# ============================================================
-
-exec /usr/local/bin/vps-out-run
-MAIN_EOF
-
-    chmod +x /usr/local/bin/vps-out-main
-
-    # 直接把当前脚本复制为运行主体
-    cp -f \
-        "$0" \
-        /usr/local/bin/vps-out-run
-
-    chmod +x /usr/local/bin/vps-out-run
-
-    cat > "$CMD" <<'EOF'
-#!/usr/bin/env bash
-exec /usr/local/bin/vps-out
 EOF
 
-    chmod +x "$CMD"
-
+    chmod +x "$VPS_CMD"
 }
 
 # ============================================================
-# 第一次安装时不要让复制后的脚本再次安装自身
-# ============================================================
-
-if [ "${VPS_OUT_INTERNAL:-0}" = "1" ]; then
-
-    menu
-    exit 0
-
-fi
-
-# ============================================================
-# 安装
+# 主程序
 # ============================================================
 
 install_dependencies
+
 install_singbox
 
-# ============================================================
-# 写入真正运行脚本
-# ============================================================
-
-SELF="$0"
-
-if [ -f "$SELF" ]; then
-
-    cp -f \
-        "$SELF" \
-        /usr/local/bin/vps-out-run
-
-    chmod +x \
-        /usr/local/bin/vps-out-run
-
-fi
-
-# ============================================================
-# out
-# ============================================================
-
-cat > "$CMD" <<'EOF'
-#!/usr/bin/env bash
-exec /usr/local/bin/vps-out-run
-EOF
-
-chmod +x "$CMD"
-
-# ============================================================
-# vps-out
-# ============================================================
-
-cat > "$VPS_CMD" <<'EOF'
-#!/usr/bin/env bash
-exec /usr/local/bin/vps-out-run
-EOF
-
-chmod +x "$VPS_CMD"
-
-# ============================================================
-# 完成
-# ============================================================
+install_out_command
 
 clear
 
@@ -2358,30 +3801,21 @@ echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
 echo
-
-echo "系统：$OS"
-echo "初始化：$INIT"
-echo
-
 echo "支持："
 echo
 echo "# 1. VLESS + WS + TLS"
-echo "# 2. VLESS + WS / 无 TLS"
-echo "# 3. VLESS + Reality"
-echo "# 4. SOCKS5"
-echo "# 5. AnyTLS"
-echo "# 6. Hysteria2 / HY2"
-echo "# 7. TUIC"
-echo "# 8. Shadowsocks / SS2022"
+echo "# 2. VLESS + Reality"
+echo "# 3. SOCKS5"
+echo "# 4. AnyTLS"
+echo "# 5. Hysteria2 / HY2"
+echo "# 6. TUIC"
+echo "# 7. Shadowsocks / SS2022"
 echo
-
-echo "快捷命令："
+echo "可以直接粘贴完整连接自动解析。"
+echo
+echo "管理命令："
 echo
 echo "out"
 echo
 
-# ============================================================
-# 直接进入菜单
-# ============================================================
-
-menu
+/usr/local/bin/vps-out
