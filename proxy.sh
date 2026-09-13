@@ -11,10 +11,6 @@ OUT_CMD="/usr/local/bin/out"
 
 TMP="/tmp/vps_out_$$"
 
-OS="unknown"
-SERVICE_TYPE="systemd"
-SB_BIN=""
-
 cleanup_tmp() {
     rm -f \
         "${TMP}" \
@@ -41,144 +37,11 @@ mkdir -p "$BACKUP_DIR"
 # ============================================================
 
 detect_os() {
-
     OS="unknown"
 
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS="${ID:-unknown}"
-    fi
-
-    case "$OS" in
-        alpine)
-            SERVICE_TYPE="openrc"
-            ;;
-        *)
-            SERVICE_TYPE="systemd"
-            ;;
-    esac
-}
-
-detect_os
-
-# ============================================================
-# 服务控制兼容层
-# systemd / Alpine OpenRC
-# ============================================================
-
-service_stop() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service "$SERVICE" stop \
-                >/dev/null 2>&1 || true
-        fi
-
-    else
-
-        systemctl stop "$SERVICE" \
-            >/dev/null 2>&1 || true
-    fi
-}
-
-service_start() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service "$SERVICE" start \
-                >/dev/null 2>&1
-        else
-            return 1
-        fi
-
-    else
-
-        systemctl start "$SERVICE"
-    fi
-}
-
-service_restart() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        if command -v rc-service >/dev/null 2>&1; then
-            rc-service "$SERVICE" restart \
-                >/dev/null 2>&1
-        else
-            return 1
-        fi
-
-    else
-
-        systemctl restart "$SERVICE"
-    fi
-}
-
-service_enable() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        if command -v rc-update >/dev/null 2>&1; then
-            rc-update add "$SERVICE" default \
-                >/dev/null 2>&1 || true
-        fi
-
-    else
-
-        systemctl enable "$SERVICE" \
-            >/dev/null 2>&1 || true
-    fi
-}
-
-service_disable() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        if command -v rc-update >/dev/null 2>&1; then
-            rc-update del "$SERVICE" default \
-                >/dev/null 2>&1 || true
-        fi
-
-    else
-
-        systemctl disable "$SERVICE" \
-            >/dev/null 2>&1 || true
-    fi
-}
-
-service_reset_failed() {
-
-    if [ "$SERVICE_TYPE" = "systemd" ]; then
-
-        systemctl reset-failed "$SERVICE" \
-            >/dev/null 2>&1 || true
-
-    fi
-}
-
-service_is_active() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        rc-service "$SERVICE" status \
-            >/dev/null 2>&1
-
-    else
-
-        systemctl is-active \
-            --quiet "$SERVICE"
-    fi
-}
-
-service_reload() {
-
-    if [ "$SERVICE_TYPE" = "systemd" ]; then
-
-        systemctl daemon-reload \
-            >/dev/null 2>&1 || true
-
     fi
 }
 
@@ -192,32 +55,10 @@ install_dependencies() {
 
     case "$OS" in
 
-        alpine)
-
-            apk update \
-                >/dev/null 2>&1 || true
-
-            apk add --no-cache \
-                bash \
-                curl \
-                wget \
-                ca-certificates \
-                python3 \
-                iproute2 \
-                procps \
-                tar \
-                gzip \
-                unzip \
-                openrc \
-                >/dev/null 2>&1 || true
-            ;;
-
         debian|ubuntu)
-
             export DEBIAN_FRONTEND=noninteractive
 
-            apt-get update -y \
-                >/dev/null 2>&1 || true
+            apt-get update -y >/dev/null 2>&1 || true
 
             apt-get install -y \
                 curl \
@@ -229,7 +70,7 @@ install_dependencies() {
                 tar \
                 gzip \
                 unzip \
-                >/dev/null 2>&1 || true
+                >/dev/null 2>&1
             ;;
 
         centos|rhel|rocky|almalinux|fedora)
@@ -246,7 +87,7 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip \
-                    >/dev/null 2>&1 || true
+                    >/dev/null 2>&1
 
             elif command -v yum >/dev/null 2>&1; then
 
@@ -260,38 +101,17 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip \
-                    >/dev/null 2>&1 || true
+                    >/dev/null 2>&1
 
             fi
             ;;
 
         *)
-
-            if command -v apk >/dev/null 2>&1; then
-
-                apk update \
-                    >/dev/null 2>&1 || true
-
-                apk add --no-cache \
-                    bash \
-                    curl \
-                    wget \
-                    ca-certificates \
-                    python3 \
-                    iproute2 \
-                    procps \
-                    tar \
-                    gzip \
-                    unzip \
-                    openrc \
-                    >/dev/null 2>&1 || true
-
-            elif command -v apt-get >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
 
                 export DEBIAN_FRONTEND=noninteractive
 
-                apt-get update -y \
-                    >/dev/null 2>&1 || true
+                apt-get update -y >/dev/null 2>&1 || true
 
                 apt-get install -y \
                     curl \
@@ -303,7 +123,7 @@ install_dependencies() {
                     tar \
                     gzip \
                     unzip \
-                    >/dev/null 2>&1 || true
+                    >/dev/null 2>&1
 
             fi
             ;;
@@ -319,13 +139,9 @@ detect_singbox() {
     SB_BIN=""
 
     if command -v sing-box >/dev/null 2>&1; then
-
         SB_BIN="$(command -v sing-box)"
-
     elif [ -x "$BIN" ]; then
-
         SB_BIN="$BIN"
-
     fi
 
     if [ -n "$SB_BIN" ]; then
@@ -350,23 +166,12 @@ install_singbox() {
     echo "正在自动安装..."
     echo
 
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "未找到 curl。"
-        return 1
-    fi
-
-    bash <(
-        curl -fsSL \
-        https://sing-box.app/install.sh
-    )
+    bash <(curl -fsSL https://sing-box.app/install.sh)
 
     if ! detect_singbox; then
-
         echo
         echo "sing-box 安装失败。"
-        echo
-
-        return 1
+        exit 1
     fi
 
     echo
@@ -379,21 +184,19 @@ install_singbox() {
 
 cleanup_old_service() {
 
-    service_stop
-    service_disable
-    service_reset_failed
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
 
-    if [ "$SERVICE_TYPE" = "systemd" ]; then
+    systemctl disable "$SERVICE" >/dev/null 2>&1 || true
 
-        rm -rf \
-            /etc/systemd/system/sing-box.service.d \
-            /run/systemd/system/sing-box.service.d \
-            2>/dev/null || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
-    fi
+    # 删除可能存在的旧 service override
+    rm -rf \
+        /etc/systemd/system/sing-box.service.d \
+        /run/systemd/system/sing-box.service.d \
+        2>/dev/null || true
 
-    # 清除可能存在的旧 TUN
-
+    # 清除旧 TUN
     if command -v ip >/dev/null 2>&1; then
 
         ip link set singtun0 down \
@@ -404,15 +207,16 @@ cleanup_old_service() {
 
         ip link delete singtun0 \
             >/dev/null 2>&1 || true
-
     fi
 
+    # 清理可能的临时配置
     rm -f \
         /etc/sing-box/config.json.tmp \
         /etc/sing-box/config.json.bak \
         /etc/sing-box/config.backup.json \
         2>/dev/null || true
 
+    # 清理旧 include / fragment 配置
     rm -rf \
         /etc/sing-box/config.d \
         /etc/sing-box/conf.d \
@@ -420,14 +224,14 @@ cleanup_old_service() {
         /etc/sing-box/fragments \
         2>/dev/null || true
 
-    service_reload
+    systemctl daemon-reload >/dev/null 2>&1 || true
 }
 
 # ============================================================
-# 写入 systemd
+# 写入唯一 systemd 服务
 # ============================================================
 
-write_systemd_service() {
+write_service() {
 
     mkdir -p /etc/systemd/system
 
@@ -450,55 +254,6 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-}
-
-# ============================================================
-# 写入 Alpine OpenRC
-# ============================================================
-
-write_openrc_service() {
-
-    mkdir -p /etc/init.d
-
-    cat > /etc/init.d/sing-box <<EOF
-#!/sbin/openrc-run
-
-name="sing-box"
-description="sing-box VPS Global Outbound"
-
-command="$SB_BIN"
-command_args="run -c $CONFIG"
-
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box-error.log"
-
-depend() {
-    need net
-    after firewall
-}
-EOF
-
-    chmod +x /etc/init.d/sing-box
-}
-
-# ============================================================
-# 写入服务
-# ============================================================
-
-write_service() {
-
-    if [ "$SERVICE_TYPE" = "openrc" ]; then
-
-        write_openrc_service
-
-    else
-
-        write_systemd_service
-
-    fi
 }
 
 # ============================================================
@@ -554,12 +309,7 @@ if fp:
         "fingerprint": fp
     }
 
-print(
-    json.dumps(
-        tls,
-        ensure_ascii=False
-    )
-)
+print(json.dumps(tls, ensure_ascii=False))
 PY
 }
 
@@ -647,15 +397,10 @@ if security == "reality":
     if flow:
         out["flow"] = flow
 
-    print(
-        json.dumps(
-            {
-                "name": "VLESS + Reality",
-                "outbound": out
-            },
-            ensure_ascii=False
-        )
-    )
+    print(json.dumps({
+        "name": "VLESS + Reality",
+        "outbound": out
+    }, ensure_ascii=False))
 
     raise SystemExit
 
@@ -690,7 +435,6 @@ if transport == "ws":
         out["transport"]["headers"]["Host"] = host
 
     # TLS
-
     if security == "tls":
 
         out["tls"] = {
@@ -705,7 +449,6 @@ if transport == "ws":
         name = "VLESS + WS + TLS"
 
     # none
-
     elif security in (
         "",
         "none"
@@ -723,15 +466,10 @@ if transport == "ws":
     if flow:
         out["flow"] = flow
 
-    print(
-        json.dumps(
-            {
-                "name": name,
-                "outbound": out
-            },
-            ensure_ascii=False
-        )
-    )
+    print(json.dumps({
+        "name": name,
+        "outbound": out
+    }, ensure_ascii=False))
 
     raise SystemExit
 
@@ -765,15 +503,10 @@ if transport in (
     if flow:
         out["flow"] = flow
 
-    print(
-        json.dumps(
-            {
-                "name": "VLESS + TLS",
-                "outbound": out
-            },
-            ensure_ascii=False
-        )
-    )
+    print(json.dumps({
+        "name": "VLESS + TLS",
+        "outbound": out
+    }, ensure_ascii=False))
 
     raise SystemExit
 
@@ -799,15 +532,10 @@ if transport in (
     if flow:
         out["flow"] = flow
 
-    print(
-        json.dumps(
-            {
-                "name": "VLESS + TCP",
-                "outbound": out
-            },
-            ensure_ascii=False
-        )
-    )
+    print(json.dumps({
+        "name": "VLESS + TCP",
+        "outbound": out
+    }, ensure_ascii=False))
 
     raise SystemExit
 
@@ -832,18 +560,13 @@ import json
 import urllib.parse
 
 url = sys.argv[1]
-
 p = urllib.parse.urlsplit(url)
 
 if not p.hostname:
-    raise SystemExit(
-        "SOCKS5 缺少服务器地址"
-    )
+    raise SystemExit("SOCKS5 缺少服务器地址")
 
 if not p.port:
-    raise SystemExit(
-        "SOCKS5 缺少端口"
-    )
+    raise SystemExit("SOCKS5 缺少端口")
 
 out = {
     "type": "socks",
@@ -855,26 +578,19 @@ out = {
 }
 
 if p.username:
-
     out["username"] = urllib.parse.unquote(
         p.username
     )
 
 if p.password:
-
     out["password"] = urllib.parse.unquote(
         p.password
     )
 
-print(
-    json.dumps(
-        {
-            "name": "SOCKS5",
-            "outbound": out
-        },
-        ensure_ascii=False
-    )
-)
+print(json.dumps({
+    "name": "SOCKS5",
+    "outbound": out
+}, ensure_ascii=False))
 PY
 }
 
@@ -896,14 +612,10 @@ url = sys.argv[1]
 p = urllib.parse.urlsplit(url)
 
 if not p.hostname:
-    raise SystemExit(
-        "AnyTLS 缺少服务器地址"
-    )
+    raise SystemExit("AnyTLS 缺少服务器地址")
 
 if not p.port:
-    raise SystemExit(
-        "AnyTLS 缺少端口"
-    )
+    raise SystemExit("AnyTLS 缺少端口")
 
 q = urllib.parse.parse_qs(
     p.query,
@@ -916,7 +628,6 @@ def get(name, default=""):
 password = ""
 
 if p.username:
-
     password = urllib.parse.unquote(
         p.username
     )
@@ -929,11 +640,7 @@ if not password:
         "AnyTLS 缺少 password"
     )
 
-sni = (
-    get("sni")
-    or get("peer")
-    or p.hostname
-)
+sni = get("sni") or get("peer") or p.hostname
 
 tls = {
     "enabled": True,
@@ -951,13 +658,11 @@ if str(insecure).lower() in (
     "yes",
     "on"
 ):
-
     tls["insecure"] = True
 
 fp = get("fp")
 
 if fp:
-
     tls["utls"] = {
         "enabled": True,
         "fingerprint": fp
@@ -973,15 +678,10 @@ out = {
     "tls": tls
 }
 
-print(
-    json.dumps(
-        {
-            "name": "AnyTLS",
-            "outbound": out
-        },
-        ensure_ascii=False
-    )
-)
+print(json.dumps({
+    "name": "AnyTLS",
+    "outbound": out
+}, ensure_ascii=False))
 PY
 }
 
@@ -1023,34 +723,26 @@ def get(name, default=""):
 password = ""
 
 if p.username:
-
     password = urllib.parse.unquote(
         p.username
     )
 
 if p.password:
-
     password = urllib.parse.unquote(
         p.password
     )
 
 if not password:
-
     password = urllib.parse.unquote(
         get("password")
     )
 
 if not password:
-
     raise SystemExit(
         "Hysteria2 缺少 password"
     )
 
-sni = (
-    get("sni")
-    or get("peer")
-    or p.hostname
-)
+sni = get("sni") or get("peer") or p.hostname
 
 tls = {
     "enabled": True,
@@ -1068,7 +760,6 @@ if str(insecure).lower() in (
     "yes",
     "on"
 ):
-
     tls["insecure"] = True
 
 out = {
@@ -1087,7 +778,6 @@ if network in (
     "tcp",
     "udp"
 ):
-
     out["network"] = network
 
 obfs = get("obfs")
@@ -1109,15 +799,10 @@ if obfs:
         "password": obfs_password
     }
 
-print(
-    json.dumps(
-        {
-            "name": "Hysteria2",
-            "outbound": out
-        },
-        ensure_ascii=False
-    )
-)
+print(json.dumps({
+    "name": "Hysteria2",
+    "outbound": out
+}, ensure_ascii=False))
 PY
 }
 
@@ -1165,34 +850,26 @@ password = urllib.parse.unquote(
 )
 
 if not uuid:
-
     uuid = urllib.parse.unquote(
         get("uuid")
     )
 
 if not password:
-
     password = urllib.parse.unquote(
         get("password")
     )
 
 if not uuid:
-
     raise SystemExit(
         "TUIC 缺少 UUID"
     )
 
 if not password:
-
     raise SystemExit(
         "TUIC 缺少 password"
     )
 
-sni = (
-    get("sni")
-    or get("peer")
-    or p.hostname
-)
+sni = get("sni") or get("peer") or p.hostname
 
 tls = {
     "enabled": True,
@@ -1210,7 +887,6 @@ if str(insecure).lower() in (
     "yes",
     "on"
 ):
-
     tls["insecure"] = True
 
 out = {
@@ -1231,7 +907,6 @@ if cc in (
     "new_reno",
     "bbr"
 ):
-
     out["congestion_control"] = cc
 
 mode = get("udp_relay_mode")
@@ -1240,18 +915,12 @@ if mode in (
     "native",
     "quic"
 ):
-
     out["udp_relay_mode"] = mode
 
-print(
-    json.dumps(
-        {
-            "name": "TUIC",
-            "outbound": out
-        },
-        ensure_ascii=False
-    )
-)
+print(json.dumps({
+    "name": "TUIC",
+    "outbound": out
+}, ensure_ascii=False))
 PY
 }
 
@@ -1274,7 +943,6 @@ url = sys.argv[1]
 p = urllib.parse.urlsplit(url)
 
 def decode_b64(value):
-
     value = urllib.parse.unquote(
         value.strip()
     )
@@ -1284,21 +952,15 @@ def decode_b64(value):
     )
 
     try:
-
         return base64.urlsafe_b64decode(
             value
         ).decode()
-
     except:
-
         try:
-
             return base64.b64decode(
                 value
             ).decode()
-
         except:
-
             return ""
 
 method = ""
@@ -1343,6 +1005,7 @@ if p.username:
             password = raw_pass
 
 
+# 整体 Base64
 if not server:
 
     encoded = url.split(
@@ -1395,13 +1058,10 @@ if not server:
                     if remain.startswith(":"):
 
                         try:
-
                             port = int(
                                 remain[1:]
                             )
-
                         except:
-
                             pass
 
             elif ":" in hostpart:
@@ -1412,13 +1072,10 @@ if not server:
                 )
 
                 try:
-
                     port = int(
                         port_text
                     )
-
                 except:
-
                     pass
 
 
@@ -1431,19 +1088,16 @@ def get(name, default=""):
     return q.get(name, [default])[0]
 
 if not method:
-
     method = urllib.parse.unquote(
         get("method")
     )
 
 if not password:
-
     password = urllib.parse.unquote(
         get("password")
     )
 
 if not server:
-
     server = urllib.parse.unquote(
         get("server")
     )
@@ -1451,35 +1105,28 @@ if not server:
 if not port and get("port"):
 
     try:
-
         port = int(
             get("port")
         )
-
     except:
-
         pass
 
 if not server:
-
     raise SystemExit(
         "Shadowsocks 缺少服务器"
     )
 
 if not port:
-
     raise SystemExit(
         "Shadowsocks 缺少端口"
     )
 
 if not method:
-
     raise SystemExit(
         "Shadowsocks 缺少 method"
     )
 
 if password == "":
-
     raise SystemExit(
         "Shadowsocks 缺少 password"
     )
@@ -1494,15 +1141,10 @@ out = {
     "domain_resolver": "dns-bootstrap"
 }
 
-print(
-    json.dumps(
-        {
-            "name": "Shadowsocks / SS2022",
-            "outbound": out
-        },
-        ensure_ascii=False
-    )
-)
+print(json.dumps({
+    "name": "Shadowsocks / SS2022",
+    "outbound": out
+}, ensure_ascii=False))
 PY
 }
 
@@ -1547,101 +1189,7 @@ parse_link() {
             echo "VLESS / SOCKS5 / AnyTLS / Hysteria2 / TUIC / Shadowsocks"
             return 1
             ;;
-
     esac
-}
-
-# ============================================================
-# 清理配置中的重复 inbound
-# ============================================================
-
-fix_duplicate_inbounds() {
-
-    local file="$1"
-
-    [ -f "$file" ] || return 0
-
-    python3 - "$file" <<'PY'
-import sys
-import json
-import os
-import tempfile
-
-path = sys.argv[1]
-
-try:
-
-    with open(
-        path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        data = json.load(f)
-
-except Exception:
-    sys.exit(1)
-
-inbounds = []
-seen = set()
-
-for item in data.get(
-    "inbounds",
-    []
-):
-
-    if not isinstance(item, dict):
-        continue
-
-    tag = item.get("tag", "")
-
-    if tag and tag in seen:
-        continue
-
-    if tag:
-        seen.add(tag)
-
-    inbounds.append(item)
-
-data["inbounds"] = inbounds
-
-fd, tmp = tempfile.mkstemp(
-    prefix="singbox-",
-    suffix=".json",
-    dir=os.path.dirname(path)
-)
-
-try:
-
-    with os.fdopen(
-        fd,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-        f.write("\n")
-
-    os.replace(
-        tmp,
-        path
-    )
-
-except Exception:
-
-    try:
-        os.unlink(tmp)
-    except:
-        pass
-
-    raise
-PY
 }
 
 # ============================================================
@@ -1653,7 +1201,6 @@ generate_config() {
     local parsed="$1"
 
     mkdir -p /etc/sing-box
-    mkdir -p "$BACKUP_DIR"
 
     if [ -f "$CONFIG" ]; then
 
@@ -1667,7 +1214,6 @@ generate_config() {
 import sys
 import json
 import os
-import tempfile
 
 src = sys.argv[1]
 dst = sys.argv[2]
@@ -1677,18 +1223,12 @@ with open(
     "r",
     encoding="utf-8"
 ) as f:
-
     data = json.load(f)
 
 outbound = data["outbound"]
 
 outbound["tag"] = "proxy"
 outbound["domain_resolver"] = "dns-bootstrap"
-
-# ============================================================
-# 强制重新构建配置
-# 不继承任何旧 inbound
-# ============================================================
 
 config = {
 
@@ -1719,6 +1259,7 @@ config = {
         ],
 
         "final": "dns-proxy"
+
     },
 
     "inbounds": [
@@ -1777,35 +1318,10 @@ config = {
     }
 }
 
-# 再次确保 inbound tag 唯一
+tmp = dst + ".tmp"
 
-seen = set()
-clean_inbounds = []
-
-for item in config["inbounds"]:
-
-    tag = item.get("tag")
-
-    if tag in seen:
-        continue
-
-    if tag:
-        seen.add(tag)
-
-    clean_inbounds.append(item)
-
-config["inbounds"] = clean_inbounds
-
-directory = os.path.dirname(dst)
-
-fd, tmp = tempfile.mkstemp(
-    prefix="config-",
-    suffix=".json",
-    dir=directory
-)
-
-with os.fdopen(
-    fd,
+with open(
+    tmp,
     "w",
     encoding="utf-8"
 ) as f:
@@ -1819,8 +1335,6 @@ with os.fdopen(
 
     f.write("\n")
 
-os.chmod(tmp, 0o600)
-
 os.replace(
     tmp,
     dst
@@ -1828,28 +1342,6 @@ os.replace(
 PY
 
     chmod 600 "$CONFIG"
-
-    fix_duplicate_inbounds "$CONFIG"
-}
-
-# ============================================================
-# 清理 TUN
-# ============================================================
-
-cleanup_tun() {
-
-    if command -v ip >/dev/null 2>&1; then
-
-        ip link set singtun0 down \
-            >/dev/null 2>&1 || true
-
-        ip tuntap del dev singtun0 mode tun \
-            >/dev/null 2>&1 || true
-
-        ip link delete singtun0 \
-            >/dev/null 2>&1 || true
-
-    fi
 }
 
 # ============================================================
@@ -1871,31 +1363,60 @@ start_proxy() {
     echo "正在清理旧配置..."
     echo
 
-    service_stop
-    service_reset_failed
+    cleanup_old_service
 
-    cleanup_tun
+    # 确保当前配置只有一个 tun-in
+    python3 - "$CONFIG" <<'PY'
+import json
+import sys
 
-    # ========================================================
-    # 关键修复：
-    # 每次启动前自动去除重复 inbound tag
-    # ========================================================
+path = sys.argv[1]
 
-    if ! fix_duplicate_inbounds "$CONFIG"; then
+with open(
+    path,
+    "r",
+    encoding="utf-8"
+) as f:
+    data = json.load(f)
 
-        echo
-        echo "配置清理失败。"
-        echo
+inbounds = []
+seen = set()
 
-        return 1
-    fi
+for item in data.get("inbounds", []):
+
+    tag = item.get("tag")
+
+    if tag == "tun-in":
+
+        if tag in seen:
+            continue
+
+        seen.add(tag)
+
+    inbounds.append(item)
+
+data["inbounds"] = inbounds
+
+with open(
+    path,
+    "w",
+    encoding="utf-8"
+) as f:
+
+    json.dump(
+        data,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    f.write("\n")
+PY
 
     echo "正在检查配置..."
     echo
 
-    if ! "$SB_BIN" check \
-        -c "$CONFIG"
-    then
+    if ! "$SB_BIN" check -c "$CONFIG"; then
 
         echo
         echo "配置检查失败。"
@@ -1904,34 +1425,38 @@ start_proxy() {
         return 1
     fi
 
-    cleanup_tun
+    # 再次清理可能残留的 TUN
+    if command -v ip >/dev/null 2>&1; then
+
+        ip link set singtun0 down \
+            >/dev/null 2>&1 || true
+
+        ip tuntap del dev singtun0 mode tun \
+            >/dev/null 2>&1 || true
+
+        ip link delete singtun0 \
+            >/dev/null 2>&1 || true
+    fi
 
     write_service
 
-    service_reload
+    systemctl daemon-reload
 
-    service_enable
+    systemctl enable "$SERVICE" \
+        >/dev/null 2>&1 || true
 
-    service_reset_failed
+    systemctl reset-failed "$SERVICE" \
+        >/dev/null 2>&1 || true
 
     echo
     echo "正在启动 sing-box..."
     echo
 
-    if ! service_start; then
-
-        echo
-        echo "sing-box 启动命令执行失败。"
-        echo
-
-        show_service_log
-
-        return 1
-    fi
+    systemctl start "$SERVICE"
 
     sleep 3
 
-    if service_is_active; then
+    if systemctl is-active --quiet "$SERVICE"; then
 
         echo
         echo "全局出口已开启。"
@@ -1944,7 +1469,10 @@ start_proxy() {
     echo "sing-box 启动失败。"
     echo
 
-    show_service_log
+    journalctl \
+        -u "$SERVICE" \
+        -n 50 \
+        --no-pager
 
     return 1
 }
@@ -1955,50 +1483,24 @@ start_proxy() {
 
 stop_proxy() {
 
-    service_stop
+    systemctl stop "$SERVICE" \
+        >/dev/null 2>&1 || true
 
-    cleanup_tun
+    if command -v ip >/dev/null 2>&1; then
+
+        ip link set singtun0 down \
+            >/dev/null 2>&1 || true
+
+        ip tuntap del dev singtun0 mode tun \
+            >/dev/null 2>&1 || true
+
+        ip link delete singtun0 \
+            >/dev/null 2>&1 || true
+    fi
 
     echo
     echo "全局出口已关闭。"
     echo
-}
-
-# ============================================================
-# 日志
-# ============================================================
-
-show_service_log() {
-
-    if [ "$SERVICE_TYPE" = "systemd" ]; then
-
-        if command -v journalctl >/dev/null 2>&1; then
-
-            journalctl \
-                -u "$SERVICE" \
-                -n 80 \
-                --no-pager
-
-        fi
-
-    else
-
-        echo "sing-box 服务日志："
-        echo
-
-        if [ -f /var/log/sing-box.log ]; then
-            tail -n 80 \
-                /var/log/sing-box.log
-        fi
-
-        echo
-
-        if [ -f /var/log/sing-box-error.log ]; then
-            tail -n 80 \
-                /var/log/sing-box-error.log
-        fi
-
-    fi
 }
 
 # ============================================================
@@ -2036,13 +1538,9 @@ test_ipv4() {
     )"
 
     if [ -n "$ip" ]; then
-
         echo "$ip"
-
     else
-
         echo "失败"
-
         return 1
     fi
 }
@@ -2082,13 +1580,9 @@ test_ipv6() {
     )"
 
     if [ -n "$ip" ]; then
-
         echo "$ip"
-
     else
-
         echo "失败"
-
         return 1
     fi
 }
@@ -2106,7 +1600,7 @@ test_proxy() {
     echo "=========================================="
     echo
 
-    if ! service_is_active; then
+    if ! systemctl is-active --quiet "$SERVICE"; then
 
         echo "当前 sing-box 未运行。"
         echo
@@ -2151,7 +1645,7 @@ show_status() {
     echo "=========================================="
     echo
 
-    if service_is_active; then
+    if systemctl is-active --quiet "$SERVICE"; then
         echo "运行状态：运行中"
     else
         echo "运行状态：已停止"
@@ -2180,39 +1674,23 @@ try:
 
         data = json.load(f)
 
-    for item in data.get(
-        "outbounds",
-        []
-    ):
+    for item in data.get("outbounds", []):
 
         if item.get("tag") == "proxy":
 
             print(
                 "出口类型：" +
-                item.get(
-                    "type",
-                    "unknown"
-                )
+                item.get("type", "unknown")
             )
 
             print(
                 "服务器：" +
-                str(
-                    item.get(
-                        "server",
-                        ""
-                    )
-                )
+                str(item.get("server", ""))
             )
 
             print(
                 "端口：" +
-                str(
-                    item.get(
-                        "server_port",
-                        ""
-                    )
-                )
+                str(item.get("server_port", ""))
             )
 
             break
@@ -2271,7 +1749,10 @@ show_log() {
     echo "=========================================="
     echo
 
-    show_service_log
+    journalctl \
+        -u "$SERVICE" \
+        -n 80 \
+        --no-pager
 
     echo
 
@@ -2335,15 +1816,11 @@ select_proxy() {
             ;;
 
         *)
-
             echo
             echo "无效选择。"
-
             sleep 1
-
             return
             ;;
-
     esac
 
     echo
@@ -2360,7 +1837,6 @@ select_proxy() {
 
         echo
         echo "连接不能为空。"
-
         sleep 1
 
         return
@@ -2372,8 +1848,7 @@ select_proxy() {
 
     if ! parse_link "$LINK" \
         > "$TMP.out" \
-        2> "$TMP.err"
-    then
+        2> "$TMP.err"; then
 
         echo
         echo "解析失败："
@@ -2393,7 +1868,6 @@ select_proxy() {
 
         echo
         echo "解析失败。"
-
         sleep 2
 
         return
@@ -2424,6 +1898,7 @@ PY
     echo "解析成功：$NAME"
     echo
 
+    # 保存旧配置
     if [ -f "$CONFIG" ]; then
 
         cp -f "$CONFIG" \
@@ -2432,23 +1907,22 @@ PY
 
     fi
 
-    # ========================================================
-    # 更换出口时直接停止旧服务
-    # ========================================================
+    # 停止旧服务
+    systemctl stop "$SERVICE" \
+        >/dev/null 2>&1 || true
 
-    service_stop
+    # 删除旧 TUN
+    if command -v ip >/dev/null 2>&1; then
 
-    cleanup_tun
+        ip link set singtun0 down \
+            >/dev/null 2>&1 || true
 
-    # ========================================================
-    # 自动删除旧配置产生的重复 inbound
-    # ========================================================
+        ip tuntap del dev singtun0 mode tun \
+            >/dev/null 2>&1 || true
 
-    rm -f \
-        /etc/sing-box/config.json.tmp \
-        /etc/sing-box/config.json.bak \
-        /etc/sing-box/config.backup.json \
-        2>/dev/null || true
+        ip link delete singtun0 \
+            >/dev/null 2>&1 || true
+    fi
 
     echo "正在写入新配置..."
 
@@ -2456,15 +1930,10 @@ PY
 
         echo
         echo "配置生成失败。"
-
         sleep 2
 
         return
     fi
-
-    # 再检查一次唯一 tag
-
-    fix_duplicate_inbounds "$CONFIG"
 
     echo
     echo "正在启动..."
@@ -2508,18 +1977,7 @@ quick_install() {
     echo
 
     install_dependencies
-
-    if ! install_singbox; then
-
-        echo
-        echo "sing-box 安装失败。"
-        echo
-
-        read -r \
-            -p "按 Enter 返回菜单..." _
-
-        return
-    fi
+    install_singbox
 
     echo
     echo "依赖与 sing-box 已准备完成。"
@@ -2531,125 +1989,25 @@ quick_install() {
 
 # ============================================================
 # 安装快捷命令
-#
-# 修复：
-# 原先：
-#
-# /usr/local/bin/vps-out
-#     -> exec /usr/local/bin/vps-out
-#
-# 会自己调用自己，导致 out 无效。
-#
-# 现在：
-#
-# /usr/local/bin/vps-out = 当前完整脚本
-# /usr/local/bin/out     = exec /usr/local/bin/vps-out
 # ============================================================
 
 install_command() {
 
     mkdir -p /usr/local/bin
 
-    CURRENT_SCRIPT="${BASH_SOURCE[0]:-}"
+    cat > "$VPS_CMD" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/vps-out
+EOF
 
-    # ========================================================
-    # 尝试把当前正在执行的脚本保存为 vps-out
-    # 兼容：
-    # bash script.sh
-    # bash <(curl ...)
-    # ========================================================
-
-    if [ -n "$CURRENT_SCRIPT" ] &&
-       [ -r "$CURRENT_SCRIPT" ] &&
-       [ "$CURRENT_SCRIPT" != "$VPS_CMD" ]
-    then
-
-        if ! cat "$CURRENT_SCRIPT" \
-            > "$VPS_CMD" 2>/dev/null
-        then
-            :
-        fi
-
-    fi
-
-    # ========================================================
-    # 如果当前脚本已经是 vps-out，则不用复制
-    # ========================================================
-
-    if [ "$CURRENT_SCRIPT" = "$VPS_CMD" ]; then
-        :
-    fi
-
-    # ========================================================
-    # 防止错误生成递归 wrapper
-    # 如果 vps-out 不存在或者明显不是完整脚本，
-    # 尝试从当前脚本重新复制。
-    # ========================================================
-
-    if [ ! -s "$VPS_CMD" ] ||
-       ! grep -q "VPS 出口管理" "$VPS_CMD" 2>/dev/null
-    then
-
-        if [ -n "$CURRENT_SCRIPT" ] &&
-           [ -r "$CURRENT_SCRIPT" ]
-        then
-
-            cat "$CURRENT_SCRIPT" \
-                > "$VPS_CMD" \
-                2>/dev/null || true
-
-        fi
-    fi
-
-    chmod +x "$VPS_CMD" \
-        2>/dev/null || true
-
-    # ========================================================
-    # out 快捷命令
-    # ========================================================
+    chmod +x "$VPS_CMD"
 
     cat > "$OUT_CMD" <<'EOF'
 #!/usr/bin/env bash
-exec /usr/local/bin/vps-out "$@"
+exec /usr/local/bin/vps-out
 EOF
 
     chmod +x "$OUT_CMD"
-
-    # ========================================================
-    # 确保 PATH
-    # ========================================================
-
-    case ":$PATH:" in
-        *:/usr/local/bin:*)
-            ;;
-        *)
-            export PATH="/usr/local/bin:$PATH"
-            ;;
-    esac
-}
-
-# ============================================================
-# Alpine OpenRC 初始化
-# ============================================================
-
-prepare_alpine() {
-
-    if [ "$SERVICE_TYPE" != "openrc" ]; then
-        return 0
-    fi
-
-    mkdir -p /run/openrc
-
-    if [ -f /sbin/openrc ]; then
-
-        # 某些 Alpine 容器没有完整 OpenRC 环境
-        if ! command -v rc-service >/dev/null 2>&1; then
-            return 0
-        fi
-
-    fi
-
-    return 0
 }
 
 # ============================================================
@@ -2669,7 +2027,7 @@ menu() {
 
         echo "当前状态："
 
-        if service_is_active; then
+        if systemctl is-active --quiet "$SERVICE"; then
             echo "运行中"
         else
             echo "已停止"
@@ -2740,7 +2098,6 @@ menu() {
             8)
 
                 clear
-
                 exit 0
                 ;;
 
@@ -2748,7 +2105,6 @@ menu() {
 
                 echo
                 echo "无效选择。"
-
                 sleep 1
                 ;;
 
@@ -2761,15 +2117,8 @@ menu() {
 # 主程序
 # ============================================================
 
-detect_os
-
 install_dependencies
-
-if ! install_singbox; then
-    exit 1
-fi
-
-prepare_alpine
+install_singbox
 
 install_command
 
@@ -2779,20 +2128,8 @@ echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
 echo
-
-echo "系统：$OS"
-
-if [ "$SERVICE_TYPE" = "openrc" ]; then
-    echo "服务管理：OpenRC"
-else
-    echo "服务管理：systemd"
-fi
-
-echo
-
 echo "支持："
 echo
-
 echo "# 1. VLESS + WS"
 echo "# 2. VLESS + Reality"
 echo "# 3. SOCKS5"
@@ -2800,20 +2137,10 @@ echo "# 4. AnyTLS"
 echo "# 5. Hysteria2 / HY2"
 echo "# 6. TUIC"
 echo "# 7. Shadowsocks / SS2022"
-
 echo
-
-echo "VLESS + WS 支持："
-echo "TLS"
-echo "none"
-
-echo
-
 echo "管理命令："
 echo
-
 echo "out"
-
 echo
 
 menu
