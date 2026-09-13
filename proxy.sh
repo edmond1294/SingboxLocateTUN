@@ -1977,7 +1977,7 @@ test_proxy() {
     echo "IPv4："
 
     curl -4 \
-        --connect-timeout 5 \
+        --connect-timeout 8 \
         --max-time 15 \
         -s \
         https://api.ipify.org
@@ -1988,7 +1988,7 @@ test_proxy() {
     echo "IPv6："
 
     curl -6 \
-        --connect-timeout 5 \
+        --connect-timeout 8 \
         --max-time 15 \
         -s \
         https://api64.ipify.org \
