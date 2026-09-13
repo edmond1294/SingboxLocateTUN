@@ -1652,18 +1652,18 @@ hard_cleanup() {
 
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-
     pkill -9 -x sing-box >/dev/null 2>&1 || true
 
     # 删除旧 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
 
-    # 确保 systemd 不再使用旧 drop-in
+    # 清理本地 systemd 覆盖，避免旧 ExecStart / 多配置参数残留
     rm -rf /etc/systemd/system/sing-box.service.d
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 }
+
 
 # ============================================================
 # 生成配置
@@ -3208,6 +3208,24 @@ PY
 }
 
 # ============================================================
+# 彻底清理旧 sing-box 状态
+# ============================================================
+
+hard_cleanup() {
+
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+
+    ip link delete singtun0 >/dev/null 2>&1 || true
+
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+}
+
+# ============================================================
 # 写入配置
 # ============================================================
 
@@ -3218,13 +3236,10 @@ write_config() {
     mkdir -p /etc/sing-box
 
     # 更换出口时彻底停止旧 sing-box，并清理旧 systemd drop-in/进程/TUN
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    rm -rf /etc/systemd/system/sing-box.service.d
-    ip link delete singtun0 >/dev/null 2>&1 || true
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    hard_cleanup
+
+    # 删除旧配置，避免旧内容参与任何后续处理
+    rm -f "$CONFIG" "$CONFIG.tmp"
 
     if [ -f "$CONFIG" ]; then
 
@@ -3414,8 +3429,9 @@ install_service() {
 
     mkdir -p /etc/systemd/system
 
-    # 清理旧 drop-in，避免旧 ExecStart / 配置参数被叠加
+    # 清理旧服务覆盖，避免旧 ExecStart / 多配置参数残留
     rm -rf /etc/systemd/system/sing-box.service.d
+    systemctl revert sing-box >/dev/null 2>&1 || true
 
     cat > /etc/systemd/system/sing-box.service <<EOT
 [Unit]
@@ -3435,6 +3451,43 @@ WantedBy=multi-user.target
 EOT
 
     systemctl daemon-reload
+}
+
+# ============================================================
+# 配置自动修复
+# ============================================================
+
+repair_config() {
+
+    [ -f "$CONFIG" ] || return 1
+
+    python3 - "$CONFIG" <<'PY'
+import json
+import sys
+
+p=sys.argv[1]
+with open(p, encoding="utf-8") as f:
+    c=json.load(f)
+
+inbounds=c.get("inbounds", [])
+seen=set()
+out=[]
+for item in inbounds:
+    tag=item.get("tag")
+    if tag and tag in seen:
+        continue
+    if tag:
+        seen.add(tag)
+    out.append(item)
+c["inbounds"]=out
+
+tmp=p+".repair.tmp"
+with open(tmp,"w",encoding="utf-8") as f:
+    json.dump(c,f,ensure_ascii=False,indent=2)
+    f.write("\n")
+import os
+os.replace(tmp,p)
+PY
 }
 
 # ============================================================
@@ -3458,6 +3511,9 @@ start() {
     # 强制写入唯一的 sing-box 服务，确保只读取 config.json
     install_service
 
+    # 自动修复重复 inbound tag（包括 tun-in）
+    repair_config
+
     if ! "$SB_BIN" check \
         -c "$CONFIG"
     then
@@ -3480,6 +3536,24 @@ start() {
     systemctl start "$SERVICE"
 
     sleep 3
+
+    if ! systemctl is-active --quiet "$SERVICE"; then
+        if journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
+            echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
+            systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+            hard_cleanup
+            repair_config
+            install_service
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            if ! "$SB_BIN" check -c "$CONFIG"; then
+                echo
+                echo "自动修复后配置检查仍然失败。"
+                return 1
+            fi
+            systemctl start "$SERVICE"
+            sleep 3
+        fi
+    fi
 
     if systemctl is-active \
         --quiet "$SERVICE"
