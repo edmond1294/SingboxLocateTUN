@@ -1649,12 +1649,23 @@ generate_config() {
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
 
+    # 更换出口时彻底停止旧 sing-box，避免旧配置/旧进程残留
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+
     if [ -f "$CONFIG" ]; then
 
         cp -f "$CONFIG" \
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
 
     fi
+
+    # 删除旧配置文件，只保留 backup 目录中的历史备份
+    rm -f "$CONFIG" "$CONFIG.tmp"
+
+    # 删除可能残留的 TUN 接口
+    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
@@ -3181,12 +3192,23 @@ write_config() {
 
     mkdir -p /etc/sing-box
 
+    # 更换出口时彻底停止旧 sing-box，删除旧配置后再生成新配置
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+
     if [ -f "$CONFIG" ]; then
 
         cp "$CONFIG" \
             "/etc/sing-box/config.backup.json"
 
     fi
+
+    # 删除旧配置文件，避免旧配置残留
+    rm -f "$CONFIG" "$CONFIG.tmp"
+
+    # 删除可能残留的 TUN 接口
+    ip link delete singtun0 >/dev/null 2>&1 || true
 
     python3 - "$PARSED" "$CONFIG" <<'PY'
 
