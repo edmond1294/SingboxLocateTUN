@@ -206,6 +206,12 @@ install_service() {
 
     mkdir -p /etc/systemd/system
 
+    # 清理旧的 systemd drop-in，避免旧 ExecStart/配置参与启动
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    # 清理可能存在的旧服务定义
+    rm -f /etc/systemd/system/sing-box.service.tmp
+
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box Proxy Service
@@ -1639,6 +1645,27 @@ PY
 }
 
 # ============================================================
+# 彻底清理旧 sing-box 状态
+# ============================================================
+
+hard_cleanup() {
+
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+
+    # 删除旧 TUN 接口
+    ip link delete singtun0 >/dev/null 2>&1 || true
+
+    # 确保 systemd 不再使用旧 drop-in
+    rm -rf /etc/systemd/system/sing-box.service.d
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+}
+
+# ============================================================
 # 生成配置
 # ============================================================
 
@@ -1649,10 +1676,8 @@ generate_config() {
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
 
-    # 更换出口时彻底停止旧 sing-box，避免旧配置/旧进程残留
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    # 更换出口时彻底清理旧状态
+    hard_cleanup
 
     if [ -f "$CONFIG" ]; then
 
@@ -1847,8 +1872,8 @@ start_proxy() {
     echo "正在检查配置..."
     echo
 
-    systemctl stop "$SERVICE" \
-        >/dev/null 2>&1 || true
+    # 启动前再次彻底清理，防止旧 TUN/旧进程/旧 systemd 配置残留
+    hard_cleanup
 
     sleep 1
 
@@ -3192,10 +3217,14 @@ write_config() {
 
     mkdir -p /etc/sing-box
 
-    # 更换出口时彻底停止旧 sing-box，删除旧配置后再生成新配置
+    # 更换出口时彻底停止旧 sing-box，并清理旧 systemd drop-in/进程/TUN
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
     pkill -9 -x sing-box >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 
     if [ -f "$CONFIG" ]; then
 
