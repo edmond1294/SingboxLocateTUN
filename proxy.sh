@@ -1650,6 +1650,7 @@ PY
 
 hard_cleanup() {
 
+    # 停止并彻底杀掉旧服务/进程，避免旧实例继续占用状态
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
     pkill -9 -x sing-box >/dev/null 2>&1 || true
@@ -1657,11 +1658,21 @@ hard_cleanup() {
     # 删除旧 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
 
-    # 清理本地 systemd 覆盖，避免旧 ExecStart / 多配置参数残留
+    # 清理 systemd drop-in / 旧覆盖配置
     rm -rf /etc/systemd/system/sing-box.service.d
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+}
+
+purge_config_files() {
+
+    # 仅在更换出口、重新生成配置时调用。
+    # 启动现有配置时绝不删除当前 config.json。
+    mkdir -p /etc/sing-box
+    find /etc/sing-box -maxdepth 1 -type f \
+        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+        -delete 2>/dev/null || true
 }
 
 
@@ -1676,18 +1687,16 @@ generate_config() {
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
 
-    # 更换出口时彻底清理旧状态
-    hard_cleanup
-
+    # 更换出口时先备份当前配置
     if [ -f "$CONFIG" ]; then
-
         cp -f "$CONFIG" \
             "$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
-
     fi
 
-    # 删除旧配置文件，只保留 backup 目录中的历史备份
-    rm -f "$CONFIG" "$CONFIG.tmp"
+    # 停止旧服务并清理旧配置，避免旧 inbound 被再次合并
+    hard_cleanup
+    purge_config_files
+    rm -f "$CONFIG.tmp"
 
     # 删除可能残留的 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
@@ -3225,6 +3234,14 @@ hard_cleanup() {
     systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 }
 
+purge_config_files() {
+
+    mkdir -p /etc/sing-box
+    find /etc/sing-box -maxdepth 1 -type f \
+        \( -name '*.json' -o -name '*.jsonc' -o -name '*.yaml' -o -name '*.yml' \) \
+        -delete 2>/dev/null || true
+}
+
 # ============================================================
 # 写入配置
 # ============================================================
@@ -3235,21 +3252,17 @@ write_config() {
 
     mkdir -p /etc/sing-box
 
-    # 更换出口时彻底停止旧 sing-box，并清理旧 systemd drop-in/进程/TUN
-    hard_cleanup
-
-    # 删除旧配置，避免旧内容参与任何后续处理
-    rm -f "$CONFIG" "$CONFIG.tmp"
-
+    # 先备份当前配置，再彻底清理旧状态
     if [ -f "$CONFIG" ]; then
-
-        cp "$CONFIG" \
+        cp -f "$CONFIG" \
             "/etc/sing-box/config.backup.json"
-
     fi
 
-    # 删除旧配置文件，避免旧配置残留
-    rm -f "$CONFIG" "$CONFIG.tmp"
+    hard_cleanup
+    purge_config_files
+
+    # 确保主目录只生成当前这一份配置
+    rm -f "$CONFIG.tmp"
 
     # 删除可能残留的 TUN 接口
     ip link delete singtun0 >/dev/null 2>&1 || true
@@ -3429,7 +3442,7 @@ install_service() {
 
     mkdir -p /etc/systemd/system
 
-    # 清理旧服务覆盖，避免旧 ExecStart / 多配置参数残留
+    # 强制移除旧 drop-in / 覆盖配置
     rm -rf /etc/systemd/system/sing-box.service.d
     systemctl revert sing-box >/dev/null 2>&1 || true
 
@@ -3463,31 +3476,62 @@ repair_config() {
 
     python3 - "$CONFIG" <<'PY'
 import json
+import os
 import sys
 
 p=sys.argv[1]
-with open(p, encoding="utf-8") as f:
-    c=json.load(f)
 
-inbounds=c.get("inbounds", [])
-seen=set()
-out=[]
-for item in inbounds:
-    tag=item.get("tag")
-    if tag and tag in seen:
-        continue
-    if tag:
-        seen.add(tag)
-    out.append(item)
-c["inbounds"]=out
+try:
+    with open(p, encoding="utf-8") as f:
+        c=json.load(f)
+except Exception:
+    sys.exit(1)
+
+# 本脚本只需要一个 TUN inbound。
+# 无论旧配置里有什么 Shadowsocks/HTTP/TUN inbound，全部清掉，
+# 防止 sing-box 把旧 inbound 带进 merged config。
+c["inbounds"]=[{
+    "type":"tun",
+    "tag":"tun-in",
+    "interface_name":"singtun0",
+    "address":["172.19.0.1/30","fdfe:dcba:9876::1/126"],
+    "mtu":1500,
+    "auto_route":True,
+    "strict_route":True
+}]
 
 tmp=p+".repair.tmp"
 with open(tmp,"w",encoding="utf-8") as f:
     json.dump(c,f,ensure_ascii=False,indent=2)
     f.write("\n")
-import os
 os.replace(tmp,p)
 PY
+}
+
+
+# ============================================================
+# 启动前强制校验实际 systemd ExecStart
+# ============================================================
+
+verify_service() {
+
+    install_service
+
+    local actual
+    actual="$(systemctl show sing-box -p ExecStart --value 2>/dev/null || true)"
+
+    case "$actual" in
+        *"/usr/local/bin/sing-box run -c /etc/sing-box/config.json"*)
+            return 0
+            ;;
+    esac
+
+    echo "检测到旧 sing-box 启动参数，正在自动重建..."
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    install_service
 }
 
 # ============================================================
@@ -3497,87 +3541,79 @@ PY
 start() {
 
     if [ ! -f "$CONFIG" ]; then
-
         echo
         echo "暂无出口配置。"
-
         return 1
-
     fi
 
-    # 每次启动前强制清理旧进程、TUN、drop-in 和旧服务定义
+    # 每次启动都自动清理旧进程、旧 TUN、旧配置、旧 systemd 覆盖
     hard_cleanup
 
-    # 强制写入唯一的 sing-box 服务，确保只读取 config.json
-    install_service
-
-    # 自动修复重复 inbound tag（包括 tun-in）
+    # 强制只保留当前配置，并且只允许一个 tun-in
     repair_config
 
-    if ! "$SB_BIN" check \
-        -c "$CONFIG"
-    then
+    # 强制重建 systemd 服务，避免旧 ExecStart / 多配置参数
+    verify_service
 
+    if ! "$SB_BIN" check -c "$CONFIG" >/dev/null 2>&1; then
         echo
-        echo "配置检查失败。"
+        echo "配置检查失败，正在自动重新清理并修复..."
+        hard_cleanup
+        repair_config
+        verify_service
 
-        return 1
-
+        if ! "$SB_BIN" check -c "$CONFIG"; then
+            echo
+            echo "自动修复失败。"
+            return 1
+        fi
     fi
 
-    systemctl daemon-reload
-
-    systemctl enable "$SERVICE" \
-        >/dev/null 2>&1
-
-    systemctl reset-failed "$SERVICE" \
-        >/dev/null 2>&1
-
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    systemctl enable "$SERVICE" >/dev/null 2>&1 || true
     systemctl start "$SERVICE"
 
     sleep 3
 
-    if ! systemctl is-active --quiet "$SERVICE"; then
-        if journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
-            echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
-            systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-            hard_cleanup
-            repair_config
-            install_service
-            systemctl daemon-reload >/dev/null 2>&1 || true
-            if ! "$SB_BIN" check -c "$CONFIG"; then
-                echo
-                echo "自动修复后配置检查仍然失败。"
-                return 1
-            fi
-            systemctl start "$SERVICE"
-            sleep 3
-        fi
-    fi
-
-    if systemctl is-active \
-        --quiet "$SERVICE"
-    then
-
+    if systemctl is-active --quiet "$SERVICE"; then
         echo
         echo "全局出口已开启。"
         echo
-
         return 0
+    fi
 
+    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag"; then
+        echo "检测到 duplicate inbound tag，正在自动彻底修复..."
+
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        hard_cleanup
+        repair_config
+        verify_service
+
+        if ! "$SB_BIN" check -c "$CONFIG" >/dev/null 2>&1; then
+            echo
+            echo "自动修复后配置检查仍然失败。"
+            return 1
+        fi
+
+        systemctl start "$SERVICE"
+        sleep 3
+    fi
+
+    if systemctl is-active --quiet "$SERVICE"; then
+        echo
+        echo "全局出口已开启。"
+        echo
+        return 0
     fi
 
     echo
     echo "启动失败。"
     echo
-
-    journalctl \
-        -u "$SERVICE" \
-        -n 30 \
-        --no-pager
-
+    journalctl -u "$SERVICE" -n 40 --no-pager
     return 1
 }
+
 
 # ============================================================
 # 菜单
