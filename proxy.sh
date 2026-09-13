@@ -26,42 +26,6 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================
-# 自动修复模式
-# ============================================================
-repair_service() {
-    echo "正在自动修复 sing-box..."
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
-    pkill -9 -x sing-box >/dev/null 2>&1 || true
-    rm -rf /etc/systemd/system/sing-box.service.d
-    ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG.tmp" >/dev/null 2>&1 || true
-    systemctl daemon-reload
-    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-    if [ -f "$CONFIG" ]; then
-        if ! "$BIN" check -c "$CONFIG" >/dev/null 2>&1; then
-            echo "当前配置检查失败，请重新选择出口生成配置。"
-            return 1
-        fi
-    fi
-    systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-    systemctl restart "$SERVICE"
-    sleep 3
-    if systemctl is-active --quiet "$SERVICE"; then
-        echo "sing-box 修复完成，已正常运行。"
-        return 0
-    fi
-    echo "sing-box 修复失败。"
-    journalctl -u "$SERVICE" -n 30 --no-pager
-    return 1
-}
-
-if [ "${1:-}" = "--repair" ]; then
-    repair_service
-    exit $?
-fi
-
-# ============================================================
 # ROOT
 # ============================================================
 
@@ -241,7 +205,6 @@ install_singbox() {
 install_service() {
 
     mkdir -p /etc/systemd/system
-    rm -rf /etc/systemd/system/sing-box.service.d
 
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
@@ -252,8 +215,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=-/usr/sbin/ip link delete singtun0
 ExecStart=$SB_BIN run -c $CONFIG
-Restart=always
+Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 
@@ -1663,19 +1627,38 @@ PY
 }
 
 # ============================================================
+# 自动修复 sing-box 重复配置
+# ============================================================
+
+repair_singbox() {
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    rm -rf /run/systemd/system/sing-box.service.d
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/sing-box.service
+    rm -rf /etc/systemd/system/sing-box.service.d
+    rm -rf /run/systemd/system/sing-box.service.d
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG.tmp"
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    systemctl daemon-reload
+}
+
+# ============================================================
 # 生成配置
 # ============================================================
 
 generate_config() {
-    # 切换出口前彻底清理旧 sing-box / TUN / 旧配置
+
+    PARSED="$1"
+
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
     pkill -9 -x sing-box >/dev/null 2>&1 || true
     ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG" "$CONFIG.tmp" >/dev/null 2>&1 || true
-
-
-    PARSED="$1"
+    rm -f "$CONFIG.tmp"
 
     mkdir -p /etc/sing-box
     mkdir -p "$BACKUP_DIR"
@@ -1893,7 +1876,7 @@ start_proxy() {
     systemctl reset-failed "$SERVICE" \
         >/dev/null 2>&1
 
-    systemctl restart "$SERVICE"
+    systemctl start "$SERVICE"
 
     sleep 3
 
@@ -1906,6 +1889,31 @@ start_proxy() {
         echo
 
         return 0
+    fi
+
+    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
+        echo
+        echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
+        repair_singbox
+        install_service
+        systemctl daemon-reload
+        systemctl enable "$SERVICE" >/dev/null 2>&1
+        systemctl reset-failed "$SERVICE" >/dev/null 2>&1
+
+        if ! "$SB_BIN" check -c "$CONFIG"; then
+            echo "自动修复后配置检查仍然失败。"
+            return 1
+        fi
+
+        systemctl start "$SERVICE"
+        sleep 3
+
+        if systemctl is-active --quiet "$SERVICE"; then
+            echo
+            echo "全局出口已开启。"
+            echo
+            return 0
+        fi
     fi
 
     echo
@@ -3198,19 +3206,38 @@ PY
 }
 
 # ============================================================
+# 自动修复 sing-box 重复配置
+# ============================================================
+
+repair_singbox() {
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d
+    rm -rf /run/systemd/system/sing-box.service.d
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/sing-box.service
+    rm -rf /etc/systemd/system/sing-box.service.d
+    rm -rf /run/systemd/system/sing-box.service.d
+    ip link delete singtun0 >/dev/null 2>&1 || true
+    rm -f "$CONFIG.tmp"
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    systemctl daemon-reload
+}
+
+# ============================================================
 # 写入配置
 # ============================================================
 
 write_config() {
-    # 切换出口前彻底清理旧 sing-box / TUN / 旧配置
+
+    PARSED="$1"
+
     systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
     pkill -9 -x sing-box >/dev/null 2>&1 || true
     ip link delete singtun0 >/dev/null 2>&1 || true
-    rm -f "$CONFIG" "$CONFIG.tmp" >/dev/null 2>&1 || true
-
-
-    PARSED="$1"
+    rm -f "$CONFIG.tmp"
 
     mkdir -p /etc/sing-box
 
@@ -3422,7 +3449,7 @@ start() {
     systemctl reset-failed "$SERVICE" \
         >/dev/null 2>&1
 
-    systemctl restart "$SERVICE"
+    systemctl start "$SERVICE"
 
     sleep 3
 
@@ -3436,6 +3463,31 @@ start() {
 
         return 0
 
+    fi
+
+    if journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | grep -q "duplicate inbound tag: tun-in"; then
+        echo
+        echo "检测到 duplicate inbound tag: tun-in，正在自动修复..."
+        repair_singbox
+        install_service
+        systemctl daemon-reload
+        systemctl enable "$SERVICE" >/dev/null 2>&1
+        systemctl reset-failed "$SERVICE" >/dev/null 2>&1
+
+        if ! "$SB_BIN" check -c "$CONFIG"; then
+            echo "自动修复后配置检查仍然失败。"
+            return 1
+        fi
+
+        systemctl start "$SERVICE"
+        sleep 3
+
+        if systemctl is-active --quiet "$SERVICE"; then
+            echo
+            echo "全局出口已开启。"
+            echo
+            return 0
+        fi
     fi
 
     echo
