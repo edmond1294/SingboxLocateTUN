@@ -554,6 +554,67 @@ def parse_vless(url):
 
 
     # --------------------------------------------------------
+    # VLESS + WS (TLS 可选 / security=none)
+    # --------------------------------------------------------
+
+    if (
+        transport == "ws"
+        and
+        security in ("", "none")
+    ):
+
+        path = uq(
+            qget(
+                q,
+                "path",
+                "/"
+            )
+        )
+
+        ws_host = qget(
+            q,
+            "host"
+        )
+
+        out = {
+
+            "type": "vless",
+
+            "tag": "proxy",
+
+            "server": server,
+
+            "server_port": port,
+
+            "uuid": uuid,
+
+            "domain_resolver":
+                "dns-bootstrap",
+
+            "transport": {
+
+                "type": "ws",
+
+                "path": path or "/",
+
+                "headers": {}
+
+            }
+
+        }
+
+        if ws_host:
+            out["transport"]["headers"]["Host"] = ws_host
+
+        if flow:
+            out["flow"] = flow
+
+        # 与“VLESS + WS + TLS”使用同一个菜单项，
+        # 但 security=none 时不会写入 tls。
+        return out, "VLESS + WS + TLS"
+
+
+    # --------------------------------------------------------
     # VLESS TCP + TLS
     # --------------------------------------------------------
 
@@ -2526,6 +2587,66 @@ def parse_vless(url):
             ][
                 "Host"
             ] = host
+
+        flow = qget(
+            q,
+            "flow"
+        )
+
+        if flow:
+            out["flow"] = flow
+
+        return out
+
+
+    # --------------------------------------------------------
+    # VLESS + WS (TLS 可选 / security=none)
+    # --------------------------------------------------------
+
+    if typ == "ws" and security in ("", "none"):
+
+        path = uq(
+            qget(
+                q,
+                "path",
+                "/"
+            )
+        )
+
+        host = qget(
+            q,
+            "host"
+        )
+
+        out = {
+
+            "type": "vless",
+
+            "tag": "proxy",
+
+            "server": p.hostname,
+
+            "server_port": p.port,
+
+            "uuid": uuid,
+
+            "domain_resolver":
+                "dns-bootstrap",
+
+            "transport": {
+
+                "type": "ws",
+
+                "path": path or "/",
+
+                "headers": {}
+
+            }
+
+        }
+
+        if host:
+            out["transport"]["headers"]["Host"] = host
 
         flow = qget(
             q,
