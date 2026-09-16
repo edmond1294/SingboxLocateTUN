@@ -8,7 +8,6 @@ SERVICE="sing-box"
 BIN="/usr/local/bin/sing-box"
 CMD="/usr/local/bin/out"
 VPS_CMD="/usr/local/bin/vps-out"
-SERVICE_MODE="systemd"
 
 TMP="/tmp/out_proxy_$$"
 
@@ -65,17 +64,7 @@ install_dependencies() {
 
         alpine)
             apk update >/dev/null 2>&1 || true
-            apk add --no-cache \
-                curl \
-                wget \
-                ca-certificates \
-                python3 \
-                iproute2 \
-                procps \
-                tar \
-                gzip \
-                unzip \
-                openrc >/dev/null 2>&1 || true
+            apk add --no-cache bash curl wget ca-certificates python3 iproute2 procps tar gzip unzip openrc
             ;;
 
         ubuntu|debian)
@@ -192,15 +181,7 @@ install_singbox() {
     echo "未安装 sing-box。"
     echo "开始自动安装..."
 
-    detect_os
-
-    if [ "$OS" = "alpine" ] && command -v apk >/dev/null 2>&1; then
-        apk add --no-cache sing-box >/dev/null 2>&1 || true
-    fi
-
-    if ! command -v sing-box >/dev/null 2>&1 && [ ! -x "$BIN" ]; then
-        bash <(curl -fsSL https://sing-box.app/install.sh)
-    fi
+    bash <(curl -fsSL https://sing-box.app/install.sh)
 
     if command -v sing-box >/dev/null 2>&1; then
         SB_BIN="$(command -v sing-box)"
@@ -223,30 +204,22 @@ install_singbox() {
 }
 
 # ============================================================
-# 服务管理
+# systemd
 # ============================================================
 
-detect_service_manager() {
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        SERVICE_MODE="systemd"
-    elif command -v rc-service >/dev/null 2>&1; then
-        SERVICE_MODE="openrc"
-    else
-        SERVICE_MODE="none"
-    fi
-}
+install_service() {
 
-write_service() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        mkdir -p /etc/systemd/system
-        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
-        systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-        rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d 2>/dev/null || true
-        cat > /etc/systemd/system/sing-box.service <<SINGBOX_SERVICE_EOF
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d 2>/dev/null || true
+
+    mkdir -p /etc/systemd/system
+
+    cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
-Description=sing-box VPS Global Outbound
+Description=sing-box Proxy Service
 Documentation=https://sing-box.sagernet.org/
 After=network-online.target
 Wants=network-online.target
@@ -260,99 +233,9 @@ LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
-SINGBOX_SERVICE_EOF
-        systemctl daemon-reload
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        mkdir -p /etc/init.d
-        cat > /etc/init.d/sing-box <<SINGBOX_OPENRC_EOF
-#!/sbin/openrc-run
-name="sing-box"
-description="sing-box VPS Global Outbound"
-command="$SB_BIN"
-command_args="run -c $CONFIG"
-command_background="yes"
-pidfile="/run/sing-box.pid"
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box.log"
-depend() {
-    need net
-    after firewall
-}
-SINGBOX_OPENRC_EOF
-        chmod +x /etc/init.d/sing-box
-    else
-        echo "未检测到 systemd 或 OpenRC。"
-        return 1
-    fi
-}
+EOF
 
-service_stop() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" stop >/dev/null 2>&1 || true
-    fi
-}
-
-service_restart() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl restart "$SERVICE" >/dev/null 2>&1
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" restart >/dev/null 2>&1
-    else
-        return 1
-    fi
-}
-
-service_enable() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-update add "$SERVICE" default >/dev/null 2>&1 || true
-    fi
-}
-
-service_active() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl is-active --quiet "$SERVICE"
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" status >/dev/null 2>&1
-    else
-        return 1
-    fi
-}
-
-service_logs() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        journalctl -u "$SERVICE" -n 80 --no-pager
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        [ -f /var/log/sing-box.log ] && tail -n 80 /var/log/sing-box.log || echo "暂无 sing-box 日志。"
-    fi
-}
-
-normalize_config() {
-    python3 - "$CONFIG" <<'PY2'
-import json, os, sys
-path=sys.argv[1]
-with open(path, encoding="utf-8") as f: data=json.load(f)
-items=[]; seen=set()
-for item in data.get("inbounds", []):
-    if not isinstance(item, dict): continue
-    tag=item.get("tag")
-    if tag and tag in seen: continue
-    if tag: seen.add(tag)
-    items.append(item)
-data["inbounds"]=items
-tmp=path+".normalize.tmp"
-with open(tmp,"w",encoding="utf-8") as f:
-    json.dump(data,f,ensure_ascii=False,indent=2); f.write("\n")
-os.replace(tmp,path)
-PY2
+    systemctl daemon-reload
 }
 
 # ============================================================
@@ -608,7 +491,7 @@ def parse_vless(url):
     if (
         transport == "ws"
         and
-        security in ("", "none", "tls")
+        security in ("tls", "none", "")
     ):
 
         path = uq(
@@ -623,23 +506,6 @@ def parse_vless(url):
             q,
             "host"
         )
-
-        tls = {
-
-            "enabled": True,
-
-            "server_name":
-                sni or ws_host or server,
-
-            "utls": {
-
-                "enabled": True,
-
-                "fingerprint": fp
-
-            }
-
-        }
 
         out = {
 
@@ -674,11 +540,28 @@ def parse_vless(url):
 
             out["transport"]["headers"]["Host"] = ws_host
 
+        if security == "tls":
+
+            out["tls"] = {
+                "enabled": True,
+                "server_name": sni or ws_host or server,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
+
+            name = "VLESS + WS + TLS"
+
+        else:
+
+            name = "VLESS + WS"
+
         if flow:
 
             out["flow"] = flow
 
-        return out, "VLESS + WS + TLS" if security == "tls" else "VLESS + WS"
+        return out, name
 
 
     # --------------------------------------------------------
@@ -691,7 +574,7 @@ def parse_vless(url):
             "tcp"
         )
         and
-        security in ("", "none", "tls")
+        security == "tls"
     ):
 
         out = {
@@ -1947,17 +1830,57 @@ PY
 
 start_proxy() {
 
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d /etc/sing-box/config.d /etc/sing-box/conf.d /etc/sing-box/configs /etc/sing-box/fragments 2>/dev/null || true
+
+    if command -v ip >/dev/null 2>&1; then
+        ip link set singtun0 down >/dev/null 2>&1 || true
+        ip tuntap del dev singtun0 mode tun >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+    fi
+
+    python3 - "$CONFIG" <<'PY'
+import json, sys, os
+path=sys.argv[1]
+if os.path.isfile(path):
+    with open(path, encoding="utf-8") as f: d=json.load(f)
+    for key in ("inbounds","outbounds"):
+        seen=set(); clean=[]
+        for x in d.get(key,[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        d[key]=clean
+    dns=d.get("dns",{})
+    if isinstance(dns,dict):
+        seen=set(); clean=[]
+        for x in dns.get("servers",[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        dns["servers"]=clean
+    tmp=path+".repair.tmp"
+    with open(tmp,"w",encoding="utf-8") as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.write("\n")
+    os.replace(tmp,path)
+PY
+
     echo
     echo "正在检查配置..."
     echo
 
-    service_stop
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d 2>/dev/null || true
 
     sleep 1
 
-    normalize_config
-
-    write_service
+    install_service
 
     if ! "$SB_BIN" check \
         -c "$CONFIG"
@@ -1970,13 +1893,20 @@ start_proxy() {
         return 1
     fi
 
-    write_service
-    service_enable
-    service_restart
+    systemctl daemon-reload
+
+    systemctl enable "$SERVICE" \
+        >/dev/null 2>&1
+
+    systemctl reset-failed "$SERVICE" \
+        >/dev/null 2>&1
+
+    systemctl start "$SERVICE"
 
     sleep 3
 
-    if service_active
+    if systemctl is-active \
+        --quiet "$SERVICE"
     then
 
         echo
@@ -1990,7 +1920,10 @@ start_proxy() {
     echo "sing-box 启动失败。"
     echo
 
-    service_logs
+    journalctl \
+        -u "$SERVICE" \
+        -n 40 \
+        --no-pager
 
     return 1
 }
@@ -2001,7 +1934,8 @@ start_proxy() {
 
 stop_proxy() {
 
-    service_stop
+    systemctl stop "$SERVICE" \
+        >/dev/null 2>&1 || true
 
     echo
     echo "全局出口已关闭。"
@@ -2016,7 +1950,8 @@ status_proxy() {
 
     echo
 
-    if service_active
+    if systemctl is-active \
+        --quiet "$SERVICE"
     then
 
         echo "状态：运行中"
@@ -2051,22 +1986,23 @@ test_proxy() {
 
     echo "IPv4："
 
-    curl -4 -k -sS \
+    curl -4 \
         --connect-timeout 5 \
-        --max-time 10 \
-        https://1.1.1.1/cdn-cgi/trace 2>/dev/null |
-        sed -n 's/^ip=//p' | head -n 1 || echo "失败"
+        --max-time 15 \
+        -s \
+        https://api.ipify.org
 
     echo
 
     echo
     echo "IPv6："
 
-    curl -6 -k -sS \
+    curl -6 \
         --connect-timeout 5 \
-        --max-time 10 \
-        "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null |
-        sed -n 's/^ip=//p' | head -n 1 || echo "失败"
+        --max-time 15 \
+        -s \
+        https://api64.ipify.org \
+        2>/dev/null || true
 
     echo
 }
@@ -2085,7 +2021,7 @@ select_proxy() {
     echo
     echo "请选择出口类型："
     echo
-    echo "# 1. VLESS + WS（TLS/非TLS）"
+    echo "# 1. VLESS + WS + TLS"
     echo "# 2. VLESS + Reality"
     echo "# 3. SOCKS5"
     echo "# 4. AnyTLS"
@@ -2101,7 +2037,7 @@ select_proxy() {
     case "$TYPE" in
 
         1)
-            EXPECTED="VLESS + WS（TLS/非TLS）"
+            EXPECTED="VLESS + WS + TLS"
             ;;
 
         2)
@@ -2189,17 +2125,7 @@ with open(
 PY
 )"
 
-    TYPE_MATCH=0
-
-    if [ "$TYPE" = "1" ]; then
-        case "$PARSED_NAME" in
-            "VLESS + WS"|"VLESS + WS + TLS") TYPE_MATCH=1 ;;
-        esac
-    elif [ "$PARSED_NAME" = "$EXPECTED" ]; then
-        TYPE_MATCH=1
-    fi
-
-    if [ "$TYPE_MATCH" -ne 1 ]; then
+    if [ "$PARSED_NAME" != "$EXPECTED" ]; then
 
         echo
         echo "链接类型与选择不一致。"
@@ -2318,7 +2244,10 @@ show_log() {
     echo "=========================================="
     echo
 
-    service_logs
+    journalctl \
+        -u "$SERVICE" \
+        -n 80 \
+        --no-pager
 
     echo
 
@@ -2335,7 +2264,15 @@ install_out_command() {
     cat > "$CMD" <<'EOF'
 #!/usr/bin/env bash
 
-exec /bin/bash /usr/local/bin/vps-out
+if [ -t 0 ] && [ -t 1 ]; then
+    exec /usr/local/bin/vps-out "$@"
+fi
+
+if [ -e /dev/tty ]; then
+    exec /usr/local/bin/vps-out "$@" </dev/tty >/dev/tty 2>/dev/tty
+fi
+
+exec /usr/local/bin/vps-out "$@"
 EOF
 
     chmod +x "$CMD"
@@ -2362,139 +2299,6 @@ cleanup() {
 }
 
 trap cleanup EXIT
-
-# ============================================================
-# 服务管理
-# ============================================================
-
-SERVICE_MODE="systemd"
-
-detect_service_manager() {
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        SERVICE_MODE="systemd"
-    elif command -v rc-service >/dev/null 2>&1; then
-        SERVICE_MODE="openrc"
-    else
-        SERVICE_MODE="none"
-    fi
-}
-
-write_service() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        mkdir -p /etc/systemd/system
-        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
-        systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-        rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d 2>/dev/null || true
-        cat > /etc/systemd/system/sing-box.service <<SINGBOX_SERVICE_EOF
-[Unit]
-Description=sing-box VPS Global Outbound
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$SB_BIN run -c $CONFIG
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-SINGBOX_SERVICE_EOF
-        systemctl daemon-reload
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        mkdir -p /etc/init.d
-        cat > /etc/init.d/sing-box <<SINGBOX_OPENRC_EOF
-#!/sbin/openrc-run
-name="sing-box"
-description="sing-box VPS Global Outbound"
-command="$SB_BIN"
-command_args="run -c $CONFIG"
-command_background="yes"
-pidfile="/run/sing-box.pid"
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box.log"
-depend() {
-    need net
-    after firewall
-}
-SINGBOX_OPENRC_EOF
-        chmod +x /etc/init.d/sing-box
-    else
-        return 1
-    fi
-}
-
-service_stop() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" stop >/dev/null 2>&1 || true
-    fi
-}
-
-service_restart() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl restart "$SERVICE" >/dev/null 2>&1
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" restart >/dev/null 2>&1
-    else
-        return 1
-    fi
-}
-
-service_enable() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-update add "$SERVICE" default >/dev/null 2>&1 || true
-    fi
-}
-
-service_active() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        systemctl is-active --quiet "$SERVICE"
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        rc-service "$SERVICE" status >/dev/null 2>&1
-    else
-        return 1
-    fi
-}
-
-service_logs() {
-    detect_service_manager
-    if [ "$SERVICE_MODE" = "systemd" ]; then
-        journalctl -u "$SERVICE" -n 80 --no-pager
-    elif [ "$SERVICE_MODE" = "openrc" ]; then
-        [ -f /var/log/sing-box.log ] && tail -n 80 /var/log/sing-box.log || echo "暂无 sing-box 日志。"
-    fi
-}
-
-normalize_config() {
-    python3 - "$CONFIG" <<'PY2'
-import json, os, sys
-path=sys.argv[1]
-with open(path, encoding="utf-8") as f: data=json.load(f)
-items=[]; seen=set()
-for item in data.get("inbounds", []):
-    if not isinstance(item, dict): continue
-    tag=item.get("tag")
-    if tag and tag in seen: continue
-    if tag: seen.add(tag)
-    items.append(item)
-data["inbounds"]=items
-tmp=path+".normalize.tmp"
-with open(tmp,"w",encoding="utf-8") as f:
-    json.dump(data,f,ensure_ascii=False,indent=2); f.write("\n")
-os.replace(tmp,path)
-PY2
-}
 
 # ============================================================
 # 解析链接
@@ -2714,7 +2518,7 @@ def parse_vless(url):
         return out
 
 
-    if typ == "ws" and security == "tls":
+    if typ == "ws" and security in ("tls", "none", ""):
 
         path = uq(
             qget(
@@ -2744,23 +2548,6 @@ def parse_vless(url):
             "domain_resolver":
                 "dns-bootstrap",
 
-            "tls": {
-
-                "enabled": True,
-
-                "server_name":
-                    sni or host or p.hostname,
-
-                "utls": {
-
-                    "enabled": True,
-
-                    "fingerprint": fp
-
-                }
-
-            },
-
             "transport": {
 
                 "type": "ws",
@@ -2782,6 +2569,16 @@ def parse_vless(url):
             ][
                 "Host"
             ] = host
+
+        if security == "tls":
+            out["tls"] = {
+                "enabled": True,
+                "server_name": sni or host or p.hostname,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
+            }
 
         flow = qget(
             q,
@@ -3599,6 +3396,47 @@ PY
 
 start() {
 
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    systemctl kill "$SERVICE" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || true
+    pkill -9 -x sing-box >/dev/null 2>&1 || true
+    systemctl revert "$SERVICE" >/dev/null 2>&1 || true
+
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d /etc/sing-box/config.d /etc/sing-box/conf.d /etc/sing-box/configs /etc/sing-box/fragments 2>/dev/null || true
+
+    if command -v ip >/dev/null 2>&1; then
+        ip link set singtun0 down >/dev/null 2>&1 || true
+        ip tuntap del dev singtun0 mode tun >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+    fi
+
+    python3 - "$CONFIG" <<'PY'
+import json, sys, os
+path=sys.argv[1]
+if os.path.isfile(path):
+    with open(path, encoding="utf-8") as f: d=json.load(f)
+    for key in ("inbounds","outbounds"):
+        seen=set(); clean=[]
+        for x in d.get(key,[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        d[key]=clean
+    dns=d.get("dns",{})
+    if isinstance(dns,dict):
+        seen=set(); clean=[]
+        for x in dns.get("servers",[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        dns["servers"]=clean
+    tmp=path+".repair.tmp"
+    with open(tmp,"w",encoding="utf-8") as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.write("\n")
+    os.replace(tmp,path)
+PY
+
     if [ ! -f "$CONFIG" ]; then
 
         echo
@@ -3607,10 +3445,6 @@ start() {
         return 1
 
     fi
-
-    normalize_config
-
-    write_service
 
     if ! "$SB_BIN" check \
         -c "$CONFIG"
@@ -3623,13 +3457,39 @@ start() {
 
     fi
 
-    write_service
-    service_enable
-    service_restart
+    mkdir -p /etc/systemd/system
+    cat > /etc/systemd/system/sing-box.service <<VPS_SERVICE_EOF
+[Unit]
+Description=sing-box VPS Global Outbound
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SB_BIN run -c $CONFIG
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+VPS_SERVICE_EOF
+
+    systemctl daemon-reload
+    systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+
+    systemctl enable "$SERVICE" \
+        >/dev/null 2>&1
+
+    systemctl reset-failed "$SERVICE" \
+        >/dev/null 2>&1
+
+    systemctl start "$SERVICE"
 
     sleep 3
 
-    if service_active
+    if systemctl is-active \
+        --quiet "$SERVICE"
     then
 
         echo
@@ -3669,7 +3529,8 @@ menu() {
 
         echo "当前状态："
 
-        if service_active
+        if systemctl is-active \
+            --quiet "$SERVICE"
         then
 
             echo "运行中"
@@ -3704,7 +3565,7 @@ menu() {
                 echo "             选择出口类型"
                 echo "=========================================="
                 echo
-                echo "# 1. VLESS + WS（TLS/非TLS）"
+                echo "# 1. VLESS + WS + TLS"
                 echo "# 2. VLESS + Reality"
                 echo "# 3. SOCKS5"
                 echo "# 4. AnyTLS"
@@ -3758,193 +3619,121 @@ menu() {
                         ;;
 
                 esac
-
                 echo
                 echo "请选择：$EXPECT"
                 echo
                 echo "直接粘贴完整链接："
                 echo
-
                 read -r \
                     -p "> " \
                     LINK
-
                 if [ -z "$LINK" ]; then
-
                     echo "不能为空。"
-
                     sleep 1
-
                     continue
-
                 fi
-
                 if ! parse_link "$LINK"; then
-
                     echo
                     echo "解析失败："
-
                     cat "$TMP.err" \
                         2>/dev/null || true
-
                     sleep 2
-
                     continue
-
                 fi
-
                 write_config "$TMP.out"
-
                 echo
                 echo "解析成功。"
                 echo
                 echo "正在启动..."
                 echo
-
                 start
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             2)
-
                 start
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             3)
-
-                service_stop
-
+                systemctl stop "$SERVICE"
                 echo
                 echo "全局出口已关闭。"
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             4)
-
                 echo
-
                 systemctl status \
                     "$SERVICE" \
                     --no-pager
-
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             5)
-
                 echo
                 echo "IPv4："
-
                 curl -4 \
                     --connect-timeout 5 \
                     --max-time 15 \
-                    https://1.1.1.1/cdn-cgi/trace
-
+                    https://api.ipify.org
                 echo
                 echo
                 echo "IPv6："
-
                 curl -6 \
                     --connect-timeout 5 \
                     --max-time 15 \
-                    https://[2606:4700:4700::1111]/cdn-cgi/trace \
+                    https://api64.ipify.org \
                     2>/dev/null || true
-
                 echo
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             6)
-
                 echo
-
                 if [ -f "$CONFIG" ]; then
-
                     cat "$CONFIG"
-
                 else
-
                     echo "暂无配置。"
-
                 fi
-
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             7)
-
-                service_logs
-
+                journalctl \
+                    -u "$SERVICE" \
+                    -n 80 \
+                    --no-pager
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             8)
-
                 clear
-
                 exit 0
-
                 ;;
-
             *)
-
                 echo "无效选择。"
-
                 sleep 1
-
                 ;;
-
         esac
-
     done
 }
-
 menu
-
 EOF
-
     chmod +x "$VPS_CMD"
 }
-
 # ============================================================
 # 主程序
 # ============================================================
-
 install_dependencies
-
 install_singbox
-
 install_out_command
-
 clear
-
 echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
@@ -3965,5 +3754,4 @@ echo "管理命令："
 echo
 echo "out"
 echo
-
 /usr/local/bin/vps-out
