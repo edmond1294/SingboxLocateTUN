@@ -1995,16 +1995,28 @@ install_command() {
 
     mkdir -p /usr/local/bin
 
-    cat > "$VPS_CMD" <<'EOF'
-#!/usr/bin/env bash
-exec /usr/local/bin/vps-out
-EOF
+    # 将当前脚本保存为永久管理程序。
+    # 旧版本只创建了启动器，但没有真正创建 vps-out，
+    # 因此执行 out 时会因为目标不存在而失效。
+    local self="${BASH_SOURCE[0]}"
+
+    if [ -f "$self" ] && [ -r "$self" ]; then
+        cp -f "$self" "$VPS_CMD" 2>/dev/null || true
+    fi
+
+    # 如果当前脚本本身就是 vps-out，则无需再次复制。
+    if [ ! -s "$VPS_CMD" ]; then
+        echo
+        echo "无法安装管理命令：无法定位当前脚本文件。"
+        echo "请使用 bash 脚本文件运行此版本，不要使用管道直接执行。"
+        return 1
+    fi
 
     chmod +x "$VPS_CMD"
 
     cat > "$OUT_CMD" <<'EOF'
 #!/usr/bin/env bash
-exec /usr/local/bin/vps-out
+exec /usr/local/bin/vps-out "$@"
 EOF
 
     chmod +x "$OUT_CMD"
@@ -2120,7 +2132,9 @@ menu() {
 install_dependencies
 install_singbox
 
-install_command
+if ! install_command; then
+    exit 1
+fi
 
 clear
 
