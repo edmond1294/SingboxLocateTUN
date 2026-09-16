@@ -62,6 +62,11 @@ install_dependencies() {
 
     case "$OS" in
 
+        alpine)
+            apk update >/dev/null 2>&1 || true
+            apk add --no-cache bash curl wget ca-certificates python3 iproute2 procps tar gzip unzip openrc
+            ;;
+
         ubuntu|debian)
 
             export DEBIAN_FRONTEND=noninteractive
@@ -203,6 +208,8 @@ install_singbox() {
 # ============================================================
 
 install_service() {
+
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d 2>/dev/null || true
 
     mkdir -p /etc/systemd/system
 
@@ -480,7 +487,7 @@ def parse_vless(url):
     if (
         transport == "ws"
         and
-        security == "tls"
+        security in ("tls", "none", "")
     ):
 
         path = uq(
@@ -495,23 +502,6 @@ def parse_vless(url):
             q,
             "host"
         )
-
-        tls = {
-
-            "enabled": True,
-
-            "server_name":
-                sni or ws_host or server,
-
-            "utls": {
-
-                "enabled": True,
-
-                "fingerprint": fp
-
-            }
-
-        }
 
         out = {
 
@@ -546,72 +536,28 @@ def parse_vless(url):
 
             out["transport"]["headers"]["Host"] = ws_host
 
-        if flow:
+        if security == "tls":
 
-            out["flow"] = flow
-
-        return out, "VLESS + WS + TLS"
-
-
-    # --------------------------------------------------------
-    # VLESS + WS (TLS 可选 / security=none)
-    # --------------------------------------------------------
-
-    if (
-        transport == "ws"
-        and
-        security in ("", "none")
-    ):
-
-        path = uq(
-            qget(
-                q,
-                "path",
-                "/"
-            )
-        )
-
-        ws_host = qget(
-            q,
-            "host"
-        )
-
-        out = {
-
-            "type": "vless",
-
-            "tag": "proxy",
-
-            "server": server,
-
-            "server_port": port,
-
-            "uuid": uuid,
-
-            "domain_resolver":
-                "dns-bootstrap",
-
-            "transport": {
-
-                "type": "ws",
-
-                "path": path or "/",
-
-                "headers": {}
-
+            out["tls"] = {
+                "enabled": True,
+                "server_name": sni or ws_host or server,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
             }
 
-        }
+            name = "VLESS + WS + TLS"
 
-        if ws_host:
-            out["transport"]["headers"]["Host"] = ws_host
+        else:
+
+            name = "VLESS + WS"
 
         if flow:
+
             out["flow"] = flow
 
-        # 与“VLESS + WS + TLS”使用同一个菜单项，
-        # 但 security=none 时不会写入 tls。
-        return out, "VLESS + WS + TLS"
+        return out, name
 
 
     # --------------------------------------------------------
@@ -1880,6 +1826,44 @@ PY
 
 start_proxy() {
 
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d /etc/sing-box/config.d /etc/sing-box/conf.d /etc/sing-box/configs /etc/sing-box/fragments 2>/dev/null || true
+
+    if command -v ip >/dev/null 2>&1; then
+        ip link set singtun0 down >/dev/null 2>&1 || true
+        ip tuntap del dev singtun0 mode tun >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+    fi
+
+    python3 - "$CONFIG" <<'PY'
+import json, sys, os
+path=sys.argv[1]
+if os.path.isfile(path):
+    with open(path, encoding="utf-8") as f: d=json.load(f)
+    for key in ("inbounds","outbounds"):
+        seen=set(); clean=[]
+        for x in d.get(key,[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        d[key]=clean
+    dns=d.get("dns",{})
+    if isinstance(dns,dict):
+        seen=set(); clean=[]
+        for x in dns.get("servers",[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        dns["servers"]=clean
+    tmp=path+".repair.tmp"
+    with open(tmp,"w",encoding="utf-8") as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.write("\n")
+    os.replace(tmp,path)
+PY
+
     echo
     echo "正在检查配置..."
     echo
@@ -1910,7 +1894,7 @@ start_proxy() {
     systemctl reset-failed "$SERVICE" \
         >/dev/null 2>&1
 
-    systemctl restart "$SERVICE"
+    systemctl start "$SERVICE"
 
     sleep 3
 
@@ -2273,7 +2257,7 @@ install_out_command() {
     cat > "$CMD" <<'EOF'
 #!/usr/bin/env bash
 
-exec /usr/local/bin/vps-out
+exec /usr/local/bin/vps-out "$@"
 EOF
 
     chmod +x "$CMD"
@@ -2519,7 +2503,7 @@ def parse_vless(url):
         return out
 
 
-    if typ == "ws" and security == "tls":
+    if typ == "ws" and security in ("tls", "none", ""):
 
         path = uq(
             qget(
@@ -2548,23 +2532,6 @@ def parse_vless(url):
 
             "domain_resolver":
                 "dns-bootstrap",
-
-            "tls": {
-
-                "enabled": True,
-
-                "server_name":
-                    sni or host or p.hostname,
-
-                "utls": {
-
-                    "enabled": True,
-
-                    "fingerprint": fp
-
-                }
-
-            },
 
             "transport": {
 
@@ -2588,65 +2555,15 @@ def parse_vless(url):
                 "Host"
             ] = host
 
-        flow = qget(
-            q,
-            "flow"
-        )
-
-        if flow:
-            out["flow"] = flow
-
-        return out
-
-
-    # --------------------------------------------------------
-    # VLESS + WS (TLS 可选 / security=none)
-    # --------------------------------------------------------
-
-    if typ == "ws" and security in ("", "none"):
-
-        path = uq(
-            qget(
-                q,
-                "path",
-                "/"
-            )
-        )
-
-        host = qget(
-            q,
-            "host"
-        )
-
-        out = {
-
-            "type": "vless",
-
-            "tag": "proxy",
-
-            "server": p.hostname,
-
-            "server_port": p.port,
-
-            "uuid": uuid,
-
-            "domain_resolver":
-                "dns-bootstrap",
-
-            "transport": {
-
-                "type": "ws",
-
-                "path": path or "/",
-
-                "headers": {}
-
+        if security == "tls":
+            out["tls"] = {
+                "enabled": True,
+                "server_name": sni or host or p.hostname,
+                "utls": {
+                    "enabled": True,
+                    "fingerprint": fp
+                }
             }
-
-        }
-
-        if host:
-            out["transport"]["headers"]["Host"] = host
 
         flow = qget(
             q,
@@ -3464,6 +3381,44 @@ PY
 
 start() {
 
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+
+    rm -rf /etc/systemd/system/sing-box.service.d /run/systemd/system/sing-box.service.d /etc/sing-box/config.d /etc/sing-box/conf.d /etc/sing-box/configs /etc/sing-box/fragments 2>/dev/null || true
+
+    if command -v ip >/dev/null 2>&1; then
+        ip link set singtun0 down >/dev/null 2>&1 || true
+        ip tuntap del dev singtun0 mode tun >/dev/null 2>&1 || true
+        ip link delete singtun0 >/dev/null 2>&1 || true
+    fi
+
+    python3 - "$CONFIG" <<'PY'
+import json, sys, os
+path=sys.argv[1]
+if os.path.isfile(path):
+    with open(path, encoding="utf-8") as f: d=json.load(f)
+    for key in ("inbounds","outbounds"):
+        seen=set(); clean=[]
+        for x in d.get(key,[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        d[key]=clean
+    dns=d.get("dns",{})
+    if isinstance(dns,dict):
+        seen=set(); clean=[]
+        for x in dns.get("servers",[]):
+            tag=x.get("tag") if isinstance(x,dict) else None
+            if tag and tag in seen: continue
+            if tag: seen.add(tag)
+            clean.append(x)
+        dns["servers"]=clean
+    tmp=path+".repair.tmp"
+    with open(tmp,"w",encoding="utf-8") as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.write("\n")
+    os.replace(tmp,path)
+PY
+
     if [ ! -f "$CONFIG" ]; then
 
         echo
@@ -3492,7 +3447,7 @@ start() {
     systemctl reset-failed "$SERVICE" \
         >/dev/null 2>&1
 
-    systemctl restart "$SERVICE"
+    systemctl start "$SERVICE"
 
     sleep 3
 
@@ -3627,196 +3582,121 @@ menu() {
                         ;;
 
                 esac
-
                 echo
                 echo "请选择：$EXPECT"
                 echo
                 echo "直接粘贴完整链接："
                 echo
-
                 read -r \
                     -p "> " \
                     LINK
-
                 if [ -z "$LINK" ]; then
-
                     echo "不能为空。"
-
                     sleep 1
-
                     continue
-
                 fi
-
                 if ! parse_link "$LINK"; then
-
                     echo
                     echo "解析失败："
-
                     cat "$TMP.err" \
                         2>/dev/null || true
-
                     sleep 2
-
                     continue
-
                 fi
-
                 write_config "$TMP.out"
-
                 echo
                 echo "解析成功。"
                 echo
                 echo "正在启动..."
                 echo
-
                 start
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             2)
-
                 start
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             3)
-
                 systemctl stop "$SERVICE"
-
                 echo
                 echo "全局出口已关闭。"
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             4)
-
                 echo
-
                 systemctl status \
                     "$SERVICE" \
                     --no-pager
-
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             5)
-
                 echo
                 echo "IPv4："
-
                 curl -4 \
                     --connect-timeout 5 \
                     --max-time 15 \
                     https://api.ipify.org
-
                 echo
                 echo
                 echo "IPv6："
-
                 curl -6 \
                     --connect-timeout 5 \
                     --max-time 15 \
                     https://api64.ipify.org \
                     2>/dev/null || true
-
                 echo
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             6)
-
                 echo
-
                 if [ -f "$CONFIG" ]; then
-
                     cat "$CONFIG"
-
                 else
-
                     echo "暂无配置。"
-
                 fi
-
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             7)
-
                 journalctl \
                     -u "$SERVICE" \
                     -n 80 \
                     --no-pager
-
                 echo
-
                 read -r \
                     -p "按 Enter 返回菜单..." _
-
                 ;;
-
             8)
-
                 clear
-
                 exit 0
-
                 ;;
-
             *)
-
                 echo "无效选择。"
-
                 sleep 1
-
                 ;;
-
         esac
-
     done
 }
-
 menu
-
 EOF
-
     chmod +x "$VPS_CMD"
 }
-
 # ============================================================
 # 主程序
 # ============================================================
-
 install_dependencies
-
 install_singbox
-
 install_out_command
-
 clear
-
 echo "=========================================="
 echo "          VPS 全局出口安装完成"
 echo "=========================================="
@@ -3837,5 +3717,4 @@ echo "管理命令："
 echo
 echo "out"
 echo
-
 /usr/local/bin/vps-out
