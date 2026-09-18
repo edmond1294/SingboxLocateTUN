@@ -62,11 +62,6 @@ install_dependencies() {
 
     case "$OS" in
 
-        alpine)
-            apk update >/dev/null 2>&1 || true
-            apk add --no-cache bash curl wget ca-certificates python3 iproute2 procps tar gzip unzip openrc
-            ;;
-
         ubuntu|debian)
 
             export DEBIAN_FRONTEND=noninteractive
@@ -713,6 +708,72 @@ def parse_socks(url):
 # ============================================================
 # AnyTLS
 # ============================================================
+
+def parse_http(url):
+
+    p = urllib.parse.urlsplit(url)
+    if not p.hostname:
+        raise ValueError("HTTP 缺少服务器地址")
+    if not p.port:
+        raise ValueError("HTTP 缺少端口")
+    q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    out = {"type":"http","tag":"proxy","server":p.hostname,"server_port":p.port,"domain_resolver":"dns-bootstrap"}
+    if p.username: out["username"] = urllib.parse.unquote(p.username)
+    if p.password: out["password"] = urllib.parse.unquote(p.password)
+    headers = {}
+    for k, vals in q.items():
+        if k.lower().startswith("header-") and vals: headers[k[7:]] = vals[-1]
+    if headers: out["headers"] = headers
+    tls_enabled = p.scheme.lower() in ("https","http+tls") or qget(q,"security").lower()=="tls" or qget(q,"tls").lower() in ("1","true","yes","on")
+    if tls_enabled:
+        tls={"enabled":True,"server_name":qget(q,"sni") or p.hostname}
+        if qget(q,"insecure").lower() in ("1","true","yes","on"): tls["insecure"]=True
+        out["tls"]=tls
+    return out, "HTTP + TLS" if tls_enabled else "HTTP"
+
+
+def parse_trojan(url):
+
+    p=urllib.parse.urlsplit(url)
+    if not p.hostname: raise ValueError("Trojan 缺少服务器地址")
+    if not p.port: raise ValueError("Trojan 缺少端口")
+    q=urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    password=urllib.parse.unquote(p.username or "") or urllib.parse.unquote(qget(q,"password"))
+    if not password: raise ValueError("Trojan 缺少 password")
+    out={"type":"trojan","tag":"proxy","server":p.hostname,"server_port":p.port,"password":password,"domain_resolver":"dns-bootstrap","tls":{"enabled":True,"server_name":qget(q,"sni") or qget(q,"peer") or p.hostname}}
+    if (qget(q,"allowInsecure") or qget(q,"insecure")).lower() in ("1","true","yes","on"): out["tls"]["insecure"]=True
+    alpn=qget(q,"alpn")
+    if alpn: out["tls"]["alpn"]=[x.strip() for x in alpn.split(",") if x.strip()]
+    network=qget(q,"network").lower()
+    if network in ("tcp","udp"): out["network"]=network
+    if qget(q,"type").lower()=="ws":
+        tr={"type":"ws","path":uq(qget(q,"path","/")) or "/","headers":{}}
+        if qget(q,"host"): tr["headers"]["Host"]=qget(q,"host")
+        out["transport"]=tr
+    return out, "Trojan"
+
+
+def parse_naive(url):
+
+    p=urllib.parse.urlsplit(url)
+    if not p.hostname: raise ValueError("Naive 缺少服务器地址")
+    if not p.port: raise ValueError("Naive 缺少端口")
+    q=urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    username=urllib.parse.unquote(p.username or qget(q,"username"))
+    password=urllib.parse.unquote(p.password or qget(q,"password"))
+    if not username: raise ValueError("Naive 缺少 username")
+    if not password: raise ValueError("Naive 缺少 password")
+    out={"type":"naive","tag":"proxy","server":p.hostname,"server_port":p.port,"username":username,"password":password,"domain_resolver":"dns-bootstrap","tls":{"enabled":True,"server_name":qget(q,"sni") or qget(q,"peer") or p.hostname}}
+    if (qget(q,"allowInsecure") or qget(q,"insecure")).lower() in ("1","true","yes","on"): out["tls"]["insecure"]=True
+    extra={}
+    for k,vals in q.items():
+        if k.lower().startswith("header-") and vals: extra[k[7:]]=vals[-1]
+    if extra: out["extra_headers"]=extra
+    if p.scheme.lower()=="naive+quic" or qget(q,"quic").lower() in ("1","true","yes","on"): out["quic"]=True
+    cc=qget(q,"quic_congestion_control") or qget(q,"cc")
+    if cc: out["quic_congestion_control"]=cc
+    return out, "NaiveProxy"
+
 
 def parse_anytls(url):
 
@@ -1554,6 +1615,18 @@ def parse(url):
 
         return parse_socks(url)
 
+    if lower.startswith(("http://", "https://", "http+tls://")):
+
+        return parse_http(url)
+
+    if lower.startswith("trojan://"):
+
+        return parse_trojan(url)
+
+    if lower.startswith(("naive://", "naive+https://", "naive+quic://")):
+
+        return parse_naive(url)
+
     if lower.startswith(
         "anytls://"
     ):
@@ -1603,8 +1676,8 @@ def parse(url):
 
     raise ValueError(
         "无法识别链接。"
-        "支持 VLESS / SOCKS5 / AnyTLS / "
-        "Hysteria2 / TUIC / Shadowsocks"
+        "支持 VLESS / HTTP / Trojan / NaiveProxy / SOCKS5 / "
+        "AnyTLS / Hysteria2 / TUIC / Shadowsocks"
     )
 
 
@@ -2024,14 +2097,17 @@ select_proxy() {
     echo "# 1. VLESS + WS + TLS"
     echo "# 2. VLESS + Reality"
     echo "# 3. SOCKS5"
-    echo "# 4. AnyTLS"
-    echo "# 5. Hysteria2 / HY2"
-    echo "# 6. TUIC"
-    echo "# 7. Shadowsocks / SS2022"
+    echo "# 4. HTTP / HTTPS"
+    echo "# 5. Trojan"
+    echo "# 6. NaiveProxy"
+    echo "# 7. AnyTLS"
+    echo "# 8. Hysteria2 / HY2"
+    echo "# 9. TUIC"
+    echo "# 10. Shadowsocks / SS2022"
     echo
 
     read -r \
-        -p "请选择 [1-7]：" \
+        -p "请选择 [1-10]：" \
         TYPE
 
     case "$TYPE" in
@@ -2049,18 +2125,30 @@ select_proxy() {
             ;;
 
         4)
-            EXPECTED="AnyTLS"
+            EXPECTED="HTTP"
             ;;
 
         5)
-            EXPECTED="Hysteria2"
+            EXPECTED="Trojan"
             ;;
 
         6)
-            EXPECTED="TUIC"
+            EXPECTED="NaiveProxy"
             ;;
 
         7)
+            EXPECTED="AnyTLS"
+            ;;
+
+        8)
+            EXPECTED="Hysteria2"
+            ;;
+
+        9)
+            EXPECTED="TUIC"
+            ;;
+
+        10)
             EXPECTED="Shadowsocks / SS2022"
             ;;
 
@@ -2640,6 +2728,61 @@ def parse_socks(url):
     return out
 
 
+def parse_http(url):
+
+    p = urllib.parse.urlsplit(url)
+    if not p.hostname: raise ValueError("HTTP 缺少服务器地址")
+    if not p.port: raise ValueError("HTTP 缺少端口")
+    q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    out={"type":"http","tag":"proxy","server":p.hostname,"server_port":p.port,"domain_resolver":"dns-bootstrap"}
+    if p.username: out["username"]=urllib.parse.unquote(p.username)
+    if p.password: out["password"]=urllib.parse.unquote(p.password)
+    tls_enabled=p.scheme.lower() in ("https","http+tls") or qget(q,"security").lower()=="tls" or qget(q,"tls").lower() in ("1","true","yes","on")
+    if tls_enabled:
+        out["tls"]={"enabled":True,"server_name":qget(q,"sni") or p.hostname}
+        if qget(q,"insecure").lower() in ("1","true","yes","on"): out["tls"]["insecure"]=True
+    return out
+
+
+def parse_trojan(url):
+
+    p=urllib.parse.urlsplit(url)
+    if not p.hostname: raise ValueError("Trojan 缺少服务器地址")
+    if not p.port: raise ValueError("Trojan 缺少端口")
+    q=urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    password=urllib.parse.unquote(p.username or "") or urllib.parse.unquote(qget(q,"password"))
+    if not password: raise ValueError("Trojan 缺少 password")
+    out={"type":"trojan","tag":"proxy","server":p.hostname,"server_port":p.port,"password":password,"domain_resolver":"dns-bootstrap","tls":{"enabled":True,"server_name":qget(q,"sni") or qget(q,"peer") or p.hostname}}
+    if (qget(q,"allowInsecure") or qget(q,"insecure")).lower() in ("1","true","yes","on"): out["tls"]["insecure"]=True
+    alpn=qget(q,"alpn")
+    if alpn: out["tls"]["alpn"]=[x.strip() for x in alpn.split(",") if x.strip()]
+    network=qget(q,"network").lower()
+    if network in ("tcp","udp"): out["network"]=network
+    if qget(q,"type").lower()=="ws":
+        tr={"type":"ws","path":urllib.parse.unquote(qget(q,"path","/")) or "/","headers":{}}
+        if qget(q,"host"): tr["headers"]["Host"]=qget(q,"host")
+        out["transport"]=tr
+    return out
+
+
+def parse_naive(url):
+
+    p=urllib.parse.urlsplit(url)
+    if not p.hostname: raise ValueError("Naive 缺少服务器地址")
+    if not p.port: raise ValueError("Naive 缺少端口")
+    q=urllib.parse.parse_qs(p.query, keep_blank_values=True)
+    username=urllib.parse.unquote(p.username or qget(q,"username"))
+    password=urllib.parse.unquote(p.password or qget(q,"password"))
+    if not username: raise ValueError("Naive 缺少 username")
+    if not password: raise ValueError("Naive 缺少 password")
+    out={"type":"naive","tag":"proxy","server":p.hostname,"server_port":p.port,"username":username,"password":password,"domain_resolver":"dns-bootstrap","tls":{"enabled":True,"server_name":qget(q,"sni") or qget(q,"peer") or p.hostname}}
+    if (qget(q,"allowInsecure") or qget(q,"insecure")).lower() in ("1","true","yes","on"): out["tls"]["insecure"]=True
+    if p.scheme.lower()=="naive+quic" or qget(q,"quic").lower() in ("1","true","yes","on"): out["quic"]=True
+    cc=qget(q,"quic_congestion_control") or qget(q,"cc")
+    if cc: out["quic_congestion_control"]=cc
+    return out
+
+
 def parse_anytls(url):
 
     p = urllib.parse.urlsplit(url)
@@ -3134,41 +3277,31 @@ def parse(url):
 
     lower = url.lower()
 
-    if lower.startswith(
-        "vless://"
-    ):
+    if lower.startswith("vless://"):
         return parse_vless(url)
 
-    if lower.startswith(
-        (
-            "socks://",
-            "socks5://",
-            "socks5h://"
-        )
-    ):
+    if lower.startswith(("socks://", "socks5://", "socks5h://")):
         return parse_socks(url)
 
-    if lower.startswith(
-        "anytls://"
-    ):
+    if lower.startswith(("http://", "https://", "http+tls://")):
+        return parse_http(url)
+
+    if lower.startswith("trojan://"):
+        return parse_trojan(url)
+
+    if lower.startswith(("naive://", "naive+https://", "naive+quic://")):
+        return parse_naive(url)
+
+    if lower.startswith("anytls://"):
         return parse_anytls(url)
 
-    if lower.startswith(
-        (
-            "hysteria2://",
-            "hy2://"
-        )
-    ):
+    if lower.startswith(("hysteria2://", "hy2://")):
         return parse_hy2(url)
 
-    if lower.startswith(
-        "tuic://"
-    ):
+    if lower.startswith("tuic://"):
         return parse_tuic(url)
 
-    if lower.startswith(
-        "ss://"
-    ):
+    if lower.startswith("ss://"):
         return parse_ss(url)
 
     decoded = decode_b64(url)
@@ -3575,7 +3708,7 @@ menu() {
                 echo
 
                 read -r \
-                    -p "请选择 [1-7]：" \
+                    -p "请选择 [1-10]：" \
                     TYPE
 
                 case "$TYPE" in
